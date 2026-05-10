@@ -1,4 +1,5 @@
 mod game;
+mod stats;
 
 use std::io::{self, BufRead};
 
@@ -43,12 +44,14 @@ fn main() {
         if let Some(winner) = board.check_winner() {
             board.display();
             println!("Player {} wins!", winner);
+            stats::log_result(&format!("{winner} wins"));
             break;
         }
 
         if board.is_draw() {
             board.display();
             println!("It's a draw!");
+            stats::log_result("draw");
             break;
         }
 
