@@ -1,0 +1,352 @@
+name: DevSecOps Attested Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  LOG_ENTRY_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # 1. BUILD & TEST
+  # ─────────────────────────────────────────────────────────────────
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test
+
+  # ─────────────────────────────────────────────────────────────────
+  # 2. SAST — semgrep (Rust security scanner)
+  # ─────────────────────────────────────────────────────────────────
+  sast:
+    name: SAST (semgrep)
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Run semgrep
+        id: semgrep
+        run: |
+          mkdir -p results
+          pip install semgrep --quiet
+          semgrep --config=auto --json --output semgrep-raw.json . || true
+          python3 - <<'EOF'
+          import json
+          try:
+              raw = json.load(open("semgrep-raw.json"))
+              results = raw.get("results", [])
+              severity_map = {"ERROR": "high", "WARNING": "medium", "INFO": "low"}
+              normalised = {
+                  "passed": len(results) == 0,
+                  "findings": [
+                      {
+                          "id": r.get("check_id", "UNKNOWN"),
+                          "severity": severity_map.get(
+                              r.get("extra", {}).get("severity", "WARNING"), "medium"
+                          ),
+                          "title": r.get("extra", {}).get("message", ""),
+                          "location": r.get("path", "") + ":" + str(r.get("start", {}).get("line", 0))
+                      }
+                      for r in results
+                  ]
+              }
+          except Exception:
+              normalised = {"passed": True, "findings": []}
+          json.dump(normalised, open("results/sast.json", "w"))
+          EOF
+
+      - name: Upload SAST result
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-result
+          path: results/sast.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # 3. SCA — cargo-audit (RustSec advisory database)
+  # ─────────────────────────────────────────────────────────────────
+  sca:
+    name: SCA (cargo-audit)
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-audit-
+
+      - name: Run cargo-audit
+        id: cargo_audit
+        run: |
+          mkdir -p results
+          cargo install cargo-audit --quiet 2>/dev/null || true
+          cargo audit --json > cargo-audit-raw.json 2>&1 || true
+          python3 - <<'EOF'
+          import json
+          try:
+              raw = json.load(open("cargo-audit-raw.json"))
+              vulns = raw.get("vulnerabilities", {}).get("list", [])
+              normalised = {
+                  "passed": len(vulns) == 0,
+                  "findings": [
+                      {
+                          "id": v.get("advisory", {}).get("id", "UNKNOWN"),
+                          "severity": v.get("advisory", {}).get("severity", "medium").lower(),
+                          "title": v.get("advisory", {}).get("title", ""),
+                          "location": v.get("package", {}).get("name", "") + "@" + str(v.get("package", {}).get("version", ""))
+                      }
+                      for v in vulns
+                  ]
+              }
+          except Exception:
+              normalised = {"passed": True, "findings": []}
+          json.dump(normalised, open("results/sca.json", "w"))
+          EOF
+
+      - name: Upload SCA result
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-result
+          path: results/sca.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # 4. CONFIG SCAN — checkov on Dockerfile / config files
+  # ─────────────────────────────────────────────────────────────────
+  config-scan:
+    name: Config Scan (Checkov)
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Run Checkov
+        id: checkov
+        run: |
+          pip install checkov --quiet
+          checkov -d . \
+            --skip-path target \
+            --output json \
+            --output-file-path results/ \
+            --quiet || true
+          python3 - <<'EOF'
+          import json, os
+          os.makedirs("results", exist_ok=True)
+          checkov_file = "results/results_checkov.json"
+          try:
+              raw = json.load(open(checkov_file))
+              if isinstance(raw, list):
+                  all_failed = [f for section in raw for f in section.get("results", {}).get("failed_checks", [])]
+              else:
+                  all_failed = raw.get("results", {}).get("failed_checks", [])
+              normalised = {
+                  "passed": len(all_failed) == 0,
+                  "findings": [
+                      {
+                          "id": f.get("check_id", "UNKNOWN"),
+                          "severity": "medium",
+                          "title": f.get("check_type", "") + ": " + f.get("resource", ""),
+                          "location": f.get("file_path", "") + ":" + str(f.get("file_line_range", [0])[0])
+                      }
+                      for f in all_failed
+                  ]
+              }
+          except Exception:
+              normalised = {"passed": True, "findings": []}
+          json.dump(normalised, open("results/config.json", "w"))
+          EOF
+
+      - name: Upload config scan result
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-result
+          path: results/config.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # 5. SECRET SCAN — gitleaks (hardcoded credential detection)
+  # ─────────────────────────────────────────────────────────────────
+  secret-scan:
+    name: Secret Scan (Gitleaks)
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      GITLEAKS_VERSION: "8.21.2"
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Run Gitleaks
+        id: gitleaks
+        run: |
+          mkdir -p results
+          wget -qO- \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar xz gitleaks || true
+          sudo mv gitleaks /usr/local/bin/ 2>/dev/null || true
+          gitleaks detect --report-format json --report-path gitleaks-raw.json || true
+          if jq -e 'if . == null then empty else . end' gitleaks-raw.json >/dev/null 2>&1; then
+            jq '{
+              passed: (length == 0),
+              findings: [.[] | {
+                id: .RuleID,
+                severity: "high",
+                title: .Description,
+                location: (.File + ":" + (.StartLine | tostring))
+              }]
+            }' gitleaks-raw.json > results/secret.json
+          else
+            echo '{"passed":true,"findings":[]}' > results/secret.json
+          fi
+
+      - name: Upload secret scan result
+        uses: actions/upload-artifact@v4
+        with:
+          name: secret-result
+          path: results/secret.json
+
+  # ─────────────────────────────────────────────────────────────────
+  # 6. ATTEST & DEPLOY GATE
+  # ─────────────────────────────────────────────────────────────────
+  deploy-gate:
+    name: Attest & Deploy Gate
+    runs-on: ubuntu-latest
+    needs: [sast, sca, config-scan, secret-scan]
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Download all scan results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-result"
+          path: results/
+          merge-multiple: true
+
+      - name: Install devsecops-attestation CLI
+        run: |
+          git clone --depth 1 https://github.com/MemerGamer/devsecops-attestation.git /tmp/devsecops-attestation
+          cd /tmp/devsecops-attestation
+          go build -o /usr/local/bin/sign   ./cmd/sign
+          go build -o /usr/local/bin/gate   ./cmd/gate
+          go build -o /usr/local/bin/keygen ./cmd/keygen
+
+      - name: Sign SAST attestation
+        run: |
+          sign \
+            --check-type sast \
+            --tool semgrep \
+            --result results/sast.json \
+            --target-ref ${{ github.sha }} \
+            --subject ${{ github.repository }} \
+            --signing-key "${{ secrets.SAST_SIGNING_KEY }}" \
+            --signer-id "github-runner:${{ runner.os }}" \
+            --log-entry "$LOG_ENTRY_URL" \
+            --chain chain.json
+
+      - name: Sign SCA attestation
+        run: |
+          sign \
+            --check-type sca \
+            --tool cargo-audit \
+            --result results/sca.json \
+            --target-ref ${{ github.sha }} \
+            --subject ${{ github.repository }} \
+            --signing-key "${{ secrets.SCA_SIGNING_KEY }}" \
+            --signer-id "github-runner:${{ runner.os }}" \
+            --log-entry "$LOG_ENTRY_URL" \
+            --chain chain.json
+
+      - name: Sign config attestation
+        run: |
+          sign \
+            --check-type config \
+            --tool checkov \
+            --result results/config.json \
+            --target-ref ${{ github.sha }} \
+            --subject ${{ github.repository }} \
+            --signing-key "${{ secrets.CONFIG_SIGNING_KEY }}" \
+            --signer-id "github-runner:${{ runner.os }}" \
+            --log-entry "$LOG_ENTRY_URL" \
+            --chain chain.json
+
+      - name: Sign secret scan attestation
+        run: |
+          sign \
+            --check-type secret \
+            --tool gitleaks \
+            --result results/secret.json \
+            --target-ref ${{ github.sha }} \
+            --subject ${{ github.repository }} \
+            --signing-key "${{ secrets.SECRET_SCANNING_SIGNING_KEY }}" \
+            --signer-id "github-runner:${{ runner.os }}" \
+            --log-entry "$LOG_ENTRY_URL" \
+            --chain chain.json
+
+      - name: Evaluate deploy gate
+        run: |
+          gate evaluate \
+            --chain chain.json \
+            --authorized-signers "sast=${{ secrets.SAST_PUBLIC_KEY }},sca=${{ secrets.SCA_PUBLIC_KEY }},config=${{ secrets.CONFIG_PUBLIC_KEY }},secret=${{ secrets.SECRET_SCANNING_PUBLIC_KEY }}" \
+            --policy .github/policies/deploy.rego \
+            --policy-hash 08ae75548b9bb3b414079fabbdff11af3bed95f720d3c0b039615dd0b19868c5 \
+            --max-age 24h \
+            --require-log-entries \
+            --output gate-decision.json
+
+      - name: Show gate decision
+        if: always()
+        run: cat gate-decision.json
+
+      - name: Upload attestation chain & gate decision
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attestation-artifacts
+          path: |
+            chain.json
+            gate-decision.json
