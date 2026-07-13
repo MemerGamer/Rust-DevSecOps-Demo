@@ -24,7 +24,9 @@ import rego.v1
 #   3. SAST and SCA must pass outright (passed == true).
 #   4. Config scan may have low/medium findings but must have
 #      no critical or high findings.
-#   5. Every attestation must be signed by the key authorized for
+#   5. Zero tolerance for hardcoded credentials: any secret-scan
+#      finding blocks deployment regardless of its reported severity.
+#   6. Every attestation must be signed by the key authorized for
 #      its check type (enforced when authorized_signers is configured).
 # ─────────────────────────────────────────────────────────────────
 
@@ -39,6 +41,7 @@ default allow := false
 allow if {
     missing_checks == set()
     count(critical_findings) == 0
+    count(secret_findings) == 0
     sast_passed
     sca_passed
     # No attestations signed by unauthorized signers (only checked when
@@ -58,6 +61,13 @@ critical_findings := {f |
     a := input.attestations[_]
     f := a.result.findings[_]
     f.severity == "critical"
+}
+
+# ── Hardcoded credentials: zero tolerance regardless of severity ──
+secret_findings := {f |
+    a := input.attestations[_]
+    a.result.check_type == "secret"
+    f := a.result.findings[_]
 }
 
 # ── SAST must pass ────────────────────────────────────────────────
@@ -83,6 +93,11 @@ deny_reasons contains msg if {
 deny_reasons contains msg if {
     count(critical_findings) > 0
     msg := sprintf("%d critical finding(s) found", [count(critical_findings)])
+}
+
+deny_reasons contains msg if {
+    count(secret_findings) > 0
+    msg := sprintf("%d hardcoded credential finding(s) found", [count(secret_findings)])
 }
 
 deny_reasons contains "SAST did not pass" if not sast_passed
