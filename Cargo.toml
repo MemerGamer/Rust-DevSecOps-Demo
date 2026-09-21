@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# INTENTIONAL: pinned to 0.1.x, which is affected by RUSTSEC-2020-0071.
+# Left unfixed on purpose so the SCA check (cargo-audit) fails and the
+# deploy gate blocks deployment; see README.md. Do not upgrade.
 time = "0.1"

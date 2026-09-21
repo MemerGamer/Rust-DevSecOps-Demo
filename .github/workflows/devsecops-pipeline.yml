@@ -8,11 +8,32 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  LOG_ENTRY_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  # Versions resolved from the upstream package indexes at the time this
+  # workflow was last updated. Dependabot's github-actions ecosystem updates
+  # bump the pinned action SHAs in this file automatically, but it does not
+  # know about DEVSECOPS_ATTESTATION_VERSION or GITLEAKS_LINUX_X64_SHA256
+  # below -- those are plain env values, not `uses:` references, so
+  # dependabot never touches them. The SHA and version must be bumped
+  # together by hand: DEVSECOPS_ATTESTATION_VERSION, the
+  # `@<sha> # v0.4.0` refs on the MemerGamer/devsecops-attestation/actions/*
+  # steps further down, and the `version:` input passed to each of those
+  # steps all have to name the same release, or the action definitions
+  # resolved by SHA will not match the CLI version those steps request.
+  # Re-resolve SEMGREP_VERSION/CHECKOV_VERSION/CARGO_AUDIT_VERSION from
+  # pypi.org/crates.io when bumping by hand.
+  SEMGREP_VERSION: "1.177.0"
+  CHECKOV_VERSION: "3.3.19"
+  CARGO_AUDIT_VERSION: "0.22.2"
+  GITLEAKS_VERSION: "8.30.1"
+  # SHA256 of gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz, taken from that
+  # release's own gitleaks_${GITLEAKS_VERSION}_checksums.txt and hard-coded
+  # here so the install step below verifies the downloaded archive against a
+  # value that was not fetched from the same download as the checksums file
+  # itself. Update this alongside GITLEAKS_VERSION.
+  GITLEAKS_LINUX_X64_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  DEVSECOPS_ATTESTATION_VERSION: "0.4.0"
 
 jobs:
   # ─────────────────────────────────────────────────────────────────
@@ -23,16 +44,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable (branch ref, pinned to commit)
+        with:
+          toolchain: stable
 
       - name: Cache Cargo
-        uses: actions/cache@v5.0.4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
@@ -47,7 +71,7 @@ jobs:
         run: cargo test
 
   # ─────────────────────────────────────────────────────────────────
-  # 2. SAST — semgrep (Rust security scanner)
+  # 2. SAST -- semgrep (raw JSON only, no inline normalization)
   # ─────────────────────────────────────────────────────────────────
   sast:
     name: SAST (semgrep)
@@ -55,47 +79,42 @@ jobs:
     needs: build
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install semgrep
+        run: pip install "semgrep==${SEMGREP_VERSION}" --quiet
 
       - name: Run semgrep
-        id: semgrep
         run: |
           mkdir -p results
-          pip install semgrep --quiet
-          semgrep --config=auto --json --output semgrep-raw.json . || true
-          python3 - <<'EOF'
-          import json
-          try:
-              raw = json.load(open("semgrep-raw.json"))
-              results = raw.get("results", [])
-              severity_map = {"ERROR": "high", "WARNING": "medium", "INFO": "low"}
-              normalised = {
-                  "passed": len(results) == 0,
-                  "findings": [
-                      {
-                          "id": r.get("check_id", "UNKNOWN"),
-                          "severity": severity_map.get(
-                              r.get("extra", {}).get("severity", "WARNING"), "medium"
-                          ),
-                          "title": r.get("extra", {}).get("message", ""),
-                          "location": r.get("path", "") + ":" + str(r.get("start", {}).get("line", 0))
-                      }
-                      for r in results
-                  ]
-              }
-          except Exception:
-              normalised = {"passed": True, "findings": []}
-          json.dump(normalised, open("results/sast.json", "w"))
-          EOF
+          # By default semgrep exits 0 even when rules match; a non-zero
+          # exit means the scan itself errored (bad config, parse failure),
+          # not that findings were found, so no `|| true` is needed to keep
+          # findings from failing this job. A missing/empty output file
+          # still means the scan broke and must fail closed.
+          #
+          # --config=auto is nondeterministic (it resolves a rule set from
+          # the Semgrep Registry at request time) and does not reliably
+          # flag this demo's intentional Rust issues. Use only the
+          # repo-local rules in .semgrep/ (written to match this demo's
+          # exact code), and disable anonymous usage metrics, for a scan
+          # that is fully deterministic for a given semgrep version.
+          semgrep --config .semgrep/ --json --metrics=off --output results/semgrep-raw.json .
+          test -s results/semgrep-raw.json || {
+            echo "::error::semgrep produced no output (results/semgrep-raw.json missing or empty)"
+            exit 1
+          }
 
-      - name: Upload SAST result
-        uses: actions/upload-artifact@v4
+      - name: Upload SAST raw result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sast-result
-          path: results/sast.json
+          name: sast-raw
+          path: results/semgrep-raw.json
 
   # ─────────────────────────────────────────────────────────────────
-  # 3. SCA — cargo-audit (RustSec advisory database)
+  # 3. SCA -- cargo-audit (raw JSON only, no inline normalization)
   # ─────────────────────────────────────────────────────────────────
   sca:
     name: SCA (cargo-audit)
@@ -103,58 +122,39 @@ jobs:
     needs: build
 
     steps:
-      - uses: actions/checkout@v6.0.2
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo
-        uses: actions/cache@v5.0.4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-audit-
+          persist-credentials: false
+
+      # Prebuilt binary install instead of `cargo install --locked`: avoids
+      # a from-source compile of cargo-audit on every run and the cache
+      # bookkeeping that would otherwise need. Pinned by commit SHA; the
+      # tool version itself is pinned via the `@version` suffix.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73 # v2.87.17
+        with:
+          tool: cargo-audit@${{ env.CARGO_AUDIT_VERSION }}
 
       - name: Run cargo-audit
-        id: cargo_audit
         run: |
           mkdir -p results
-          cargo install cargo-audit --quiet 2>/dev/null || true
-          cargo audit --json > cargo-audit-raw.json 2>&1 || true
-          python3 - <<'EOF'
-          import json
-          try:
-              raw = json.load(open("cargo-audit-raw.json"))
-              vulns = raw.get("vulnerabilities", {}).get("list", [])
-              normalised = {
-                  "passed": len(vulns) == 0,
-                  "findings": [
-                      {
-                          "id": v.get("advisory", {}).get("id", "UNKNOWN"),
-                          "severity": v.get("advisory", {}).get("severity", "medium").lower(),
-                          "title": v.get("advisory", {}).get("title", ""),
-                          "location": v.get("package", {}).get("name", "") + "@" + str(v.get("package", {}).get("version", ""))
-                      }
-                      for v in vulns
-                  ]
-              }
-          except Exception:
-              normalised = {"passed": True, "findings": []}
-          json.dump(normalised, open("results/sca.json", "w"))
-          EOF
+          # cargo-audit exits non-zero when it finds vulnerabilities; that
+          # must not fail this job, but a missing/empty output means the
+          # scan itself broke and must fail closed.
+          cargo audit --json > results/cargo-audit-raw.json 2>/dev/null || true
+          test -s results/cargo-audit-raw.json || {
+            echo "::error::cargo-audit produced no output (results/cargo-audit-raw.json missing or empty)"
+            exit 1
+          }
 
-      - name: Upload SCA result
-        uses: actions/upload-artifact@v4
+      - name: Upload SCA raw result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sca-result
-          path: results/sca.json
+          name: sca-raw
+          path: results/cargo-audit-raw.json
 
   # ─────────────────────────────────────────────────────────────────
-  # 4. CONFIG SCAN — checkov on Dockerfile / config files
+  # 4. CONFIG SCAN -- checkov (raw JSON only, no inline normalization)
   # ─────────────────────────────────────────────────────────────────
   config-scan:
     name: Config Scan (Checkov)
@@ -162,191 +162,269 @@ jobs:
     needs: build
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Run Checkov
-        id: checkov
+      - name: Install checkov
+        run: pip install "checkov==${CHECKOV_VERSION}" --quiet
+
+      - name: Run checkov
         run: |
-          pip install checkov --quiet
+          mkdir -p results
+          # Checkov exits non-zero when it finds failed checks; that must
+          # not fail this job, but a missing/empty output means the scan
+          # itself broke and must fail closed.
           checkov -d . \
             --skip-path target \
             --output json \
             --output-file-path results/ \
             --quiet || true
-          python3 - <<'EOF'
-          import json, os
-          os.makedirs("results", exist_ok=True)
-          checkov_file = "results/results_checkov.json"
-          try:
-              raw = json.load(open(checkov_file))
-              if isinstance(raw, list):
-                  all_failed = [f for section in raw for f in section.get("results", {}).get("failed_checks", [])]
-              else:
-                  all_failed = raw.get("results", {}).get("failed_checks", [])
-              normalised = {
-                  "passed": len(all_failed) == 0,
-                  "findings": [
-                      {
-                          "id": f.get("check_id", "UNKNOWN"),
-                          "severity": "medium",
-                          "title": f.get("check_type", "") + ": " + f.get("resource", ""),
-                          "location": f.get("file_path", "") + ":" + str(f.get("file_line_range", [0])[0])
-                      }
-                      for f in all_failed
-                  ]
-              }
-          except Exception:
-              normalised = {"passed": True, "findings": []}
-          json.dump(normalised, open("results/config.json", "w"))
-          EOF
+          mv results/results_json.json results/checkov-raw.json 2>/dev/null || true
+          test -s results/checkov-raw.json || {
+            echo "::error::checkov produced no output (results/checkov-raw.json missing or empty)"
+            exit 1
+          }
 
-      - name: Upload config scan result
-        uses: actions/upload-artifact@v4
+      - name: Upload config scan raw result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: config-result
-          path: results/config.json
+          name: config-raw
+          path: results/checkov-raw.json
 
   # ─────────────────────────────────────────────────────────────────
-  # 5. SECRET SCAN — gitleaks (hardcoded credential detection)
+  # 5. SECRET SCAN -- gitleaks (raw JSON only, no inline normalization)
   # ─────────────────────────────────────────────────────────────────
   secret-scan:
     name: Secret Scan (Gitleaks)
     runs-on: ubuntu-latest
     needs: build
-    env:
-      GITLEAKS_VERSION: "8.21.2"
 
     steps:
-      - uses: actions/checkout@v6.0.2
+      # fetch-depth: 0 so gitleaks scans full commit history, not just the
+      # checked-out tree -- a secret introduced and later removed in a
+      # prior commit is still a leak.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
 
-      - name: Run Gitleaks
-        id: gitleaks
+      - name: Install gitleaks (pinned, checksum-verified)
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          base_url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl -fsSL -o "${archive}" "${base_url}/${archive}"
+          curl -fsSL -o checksums.txt "${base_url}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          # Verify against both the same-origin checksums file AND the
+          # SHA256 hard-coded in GITLEAKS_LINUX_X64_SHA256 above (taken from
+          # this same checksums file ahead of time and cross-checked by
+          # hand). A checksums file fetched from the same release is not an
+          # independent check on its own -- if the release itself were
+          # compromised, both the archive and its checksums file would be
+          # compromised together. The hard-coded value pins what this
+          # workflow trusts, independent of whatever the download returns.
+          grep -F " ${archive}" checksums.txt | sha256sum -c -
+          echo "${GITLEAKS_LINUX_X64_SHA256}  ${archive}" | sha256sum -c -
+          tar -xzf "${archive}" gitleaks
+          chmod +x gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+
+      - name: Run gitleaks
         run: |
           mkdir -p results
-          wget -qO- \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar xz gitleaks || true
-          sudo mv gitleaks /usr/local/bin/ 2>/dev/null || true
-          gitleaks detect --report-format json --report-path gitleaks-raw.json || true
-          if jq -e 'if . == null then empty else . end' gitleaks-raw.json >/dev/null 2>&1; then
-            jq '{
-              passed: (length == 0),
-              findings: [.[] | {
-                id: .RuleID,
-                severity: "high",
-                title: .Description,
-                location: (.File + ":" + (.StartLine | tostring))
-              }]
-            }' gitleaks-raw.json > results/secret.json
-          else
-            echo '{"passed":true,"findings":[]}' > results/secret.json
-          fi
+          # Gitleaks exits non-zero when it finds leaks; that must not fail
+          # this job, but a missing/empty output means the scan itself
+          # broke and must fail closed (a genuine clean scan still writes
+          # at least "[]").
+          gitleaks detect --report-format json --report-path results/gitleaks-raw.json --no-banner || true
+          test -s results/gitleaks-raw.json || {
+            echo "::error::gitleaks produced no output (results/gitleaks-raw.json missing or empty)"
+            exit 1
+          }
 
-      - name: Upload secret scan result
-        uses: actions/upload-artifact@v4
+      - name: Upload secret scan raw result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: secret-result
-          path: results/secret.json
+          name: secret-raw
+          path: results/gitleaks-raw.json
 
   # ─────────────────────────────────────────────────────────────────
-  # 6. ATTEST & DEPLOY GATE
+  # 6. ATTEST & DEPLOY GATE -- reuses devsecops-attestation's composite
+  #    actions instead of cloning and building the CLI in this repo.
   # ─────────────────────────────────────────────────────────────────
   deploy-gate:
     name: Attest & Deploy Gate
     runs-on: ubuntu-latest
     needs: [sast, sca, config-scan, secret-scan]
     environment: production
+    # The chain and gate decision files are written under runner.temp (see
+    # the steps below) instead of the workspace: this job does not check
+    # out the repository, since nothing it does -- downloading raw scan
+    # results, signing them, and evaluating the bundled default policy --
+    # reads any file from this repository. runner.temp is not available in
+    # job-level `env:` (only in step context), so the path is repeated as
+    # `${{ runner.temp }}/...` in each step below rather than centralized
+    # in one env var.
+    # Skip the deploy-gate job (but not the four scanner jobs above, which
+    # always run and upload their raw results regardless) whenever
+    # repository secrets would not be available to it:
+    #
+    #   - github.actor != 'dependabot[bot]': GitHub Actions withholds
+    #     repository secrets from workflow runs triggered by a dependabot
+    #     pull request, so the *_SIGNING_KEY inputs below would be empty and
+    #     normalize-sign would fail for a reason unrelated to any security
+    #     finding. (Dependabot's own commits are pushed to dependabot/*
+    #     branches, which this workflow's `push:` trigger above does not
+    #     match -- only [main, develop] -- so in practice only the
+    #     pull_request case ever reaches this condition for dependabot.)
+    #   - the pull_request.head.repo.full_name check: GitHub Actions
+    #     likewise withholds repository secrets from pull_request runs
+    #     whose head branch lives in a fork rather than this repository,
+    #     for the same reason a fork PR author must not be able to read
+    #     the signing keys through a modified workflow file. Without this
+    #     check, deploy-gate would attempt to sign with empty keys and fail
+    #     on every fork PR for a reason unrelated to security findings.
+    #     `github.event_name != 'pull_request'` makes this half of the
+    #     condition a no-op for push events, which have no pull_request
+    #     context to compare.
+    if: github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
 
     steps:
-      - uses: actions/checkout@v6.0.2
-
-      - name: Download all scan results
-        uses: actions/download-artifact@v4
+      - name: Download SAST raw result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: "*-result"
-          path: results/
-          merge-multiple: true
+          name: sast-raw
+          path: raw/sast
 
-      - name: Install devsecops-attestation CLI
-        run: |
-          git clone --depth 1 https://github.com/MemerGamer/devsecops-attestation.git /tmp/devsecops-attestation
-          cd /tmp/devsecops-attestation
-          go build -o /usr/local/bin/sign   ./cmd/sign
-          go build -o /usr/local/bin/gate   ./cmd/gate
-          go build -o /usr/local/bin/keygen ./cmd/keygen
+      - name: Download SCA raw result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sca-raw
+          path: raw/sca
 
-      - name: Sign SAST attestation
-        run: |
-          sign \
-            --check-type sast \
-            --tool semgrep \
-            --result results/sast.json \
-            --target-ref ${{ github.sha }} \
-            --subject ${{ github.repository }} \
-            --signing-key "${{ secrets.SAST_SIGNING_KEY }}" \
-            --signer-id "github-runner:${{ runner.os }}" \
-            --log-entry "$LOG_ENTRY_URL" \
-            --chain chain.json
+      - name: Download config scan raw result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: config-raw
+          path: raw/config
 
-      - name: Sign SCA attestation
-        run: |
-          sign \
-            --check-type sca \
-            --tool cargo-audit \
-            --result results/sca.json \
-            --target-ref ${{ github.sha }} \
-            --subject ${{ github.repository }} \
-            --signing-key "${{ secrets.SCA_SIGNING_KEY }}" \
-            --signer-id "github-runner:${{ runner.os }}" \
-            --log-entry "$LOG_ENTRY_URL" \
-            --chain chain.json
+      - name: Download secret scan raw result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: secret-raw
+          path: raw/secret
 
-      - name: Sign config attestation
-        run: |
-          sign \
-            --check-type config \
-            --tool checkov \
-            --result results/config.json \
-            --target-ref ${{ github.sha }} \
-            --subject ${{ github.repository }} \
-            --signing-key "${{ secrets.CONFIG_SIGNING_KEY }}" \
-            --signer-id "github-runner:${{ runner.os }}" \
-            --log-entry "$LOG_ENTRY_URL" \
-            --chain chain.json
+      # Each raw result is downloaded into its own directory above (rather
+      # than a single directory via `pattern` + `merge-multiple`) so a
+      # same-named file from one check type can never silently overwrite
+      # another's before normalize-sign reads it.
 
-      - name: Sign secret scan attestation
-        run: |
-          sign \
-            --check-type secret \
-            --tool gitleaks \
-            --result results/secret.json \
-            --target-ref ${{ github.sha }} \
-            --subject ${{ github.repository }} \
-            --signing-key "${{ secrets.SECRET_SCANNING_SIGNING_KEY }}" \
-            --signer-id "github-runner:${{ runner.os }}" \
-            --log-entry "$LOG_ENTRY_URL" \
-            --chain chain.json
+      # cosign-installer puts cosign on PATH so the setup step below can
+      # verify the devsecops-attestation release checksums.txt against its
+      # cosign keyless signature and certificate before trusting it --
+      # i.e. before installing the attest/verify/gate binaries that go on
+      # to receive the *_SIGNING_KEY secrets further down. Pinned to the
+      # sigstore/cosign-installer v4.1.2 tag commit (latest v4 release at
+      # the time this workflow was last updated; resolved via
+      # `git ls-remote --tags https://github.com/sigstore/cosign-installer`).
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - uses: MemerGamer/devsecops-attestation/actions/setup@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
+        with:
+          version: ${{ env.DEVSECOPS_ATTESTATION_VERSION }}
+          verify-signature: "true"
+
+      # fail-on is set to medium on every normalize-sign step below so the
+      # recorded normalization outcome matches the deploy gate's
+      # fail-on-severity: medium (see the gate step further down).
+      # normalize-sign already defaults fail-on to high, which is enough on
+      # its own for the SAST step's high-severity command-injection finding;
+      # leaving that default in place on the SCA and config steps would
+      # sign attestations with passed: true for their medium findings that
+      # the gate (also lowered to medium below) then denies on, an
+      # inconsistency between what was attested and what was enforced.
+      - name: Normalize and sign SAST attestation
+        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
+        with:
+          tool: semgrep
+          raw-result: raw/sast/semgrep-raw.json
+          signing-key: ${{ secrets.SAST_SIGNING_KEY }}
+          chain: ${{ runner.temp }}/attestation-chain.json
+          fail-on: medium
+
+      - name: Normalize and sign SCA attestation
+        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
+        with:
+          tool: cargo-audit
+          raw-result: raw/sca/cargo-audit-raw.json
+          signing-key: ${{ secrets.SCA_SIGNING_KEY }}
+          chain: ${{ runner.temp }}/attestation-chain.json
+          fail-on: medium
+
+      - name: Normalize and sign config attestation
+        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
+        with:
+          tool: checkov
+          raw-result: raw/config/checkov-raw.json
+          signing-key: ${{ secrets.CONFIG_SIGNING_KEY }}
+          chain: ${{ runner.temp }}/attestation-chain.json
+          fail-on: medium
+
+      - name: Normalize and sign secret scan attestation
+        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
+        with:
+          tool: gitleaks
+          raw-result: raw/secret/gitleaks-raw.json
+          signing-key: ${{ secrets.SECRET_SCANNING_SIGNING_KEY }}
+          chain: ${{ runner.temp }}/attestation-chain.json
+          fail-on: medium
 
       - name: Evaluate deploy gate
-        run: |
-          gate evaluate \
-            --chain chain.json \
-            --authorized-signers "sast=${{ secrets.SAST_PUBLIC_KEY }},sca=${{ secrets.SCA_PUBLIC_KEY }},config=${{ secrets.CONFIG_PUBLIC_KEY }},secret=${{ secrets.SECRET_SCANNING_PUBLIC_KEY }}" \
-            --policy .github/policies/deploy.rego \
-            --policy-hash 53d757c664cbcf6e55ee9b7601e4d91baf5bf623c45539f59755fb0591b23454 \
-            --max-age 24h \
-            --require-log-entries \
-            --output gate-decision.json
-
-      - name: Show gate decision
-        if: always()
-        run: cat gate-decision.json
+        uses: MemerGamer/devsecops-attestation/actions/gate@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
+        with:
+          chain: ${{ runner.temp }}/attestation-chain.json
+          authorized-signers: >-
+            sast=${{ secrets.SAST_PUBLIC_KEY }},
+            sca=${{ secrets.SCA_PUBLIC_KEY }},
+            config=${{ secrets.CONFIG_PUBLIC_KEY }},
+            secret=${{ secrets.SECRET_SCANNING_PUBLIC_KEY }}
+          max-age: 24h
+          require-log-entries: "true"
+          output: ${{ runner.temp }}/gate-decision.json
+          # No `policy:` input is set, so `gate evaluate` runs without a
+          # `--policy` flag and falls back to the policy compiled into the
+          # gate binary itself (the bundled default policy), not the
+          # deploy.rego file actions/setup separately installs alongside
+          # the binaries for callers who do want to pin/hash a policy file.
+          # That compiled-in default policy's blocking severity threshold
+          # is "high". This demo's intentional issues (command injection,
+          # unnecessary unsafe block, RUSTSEC-2020-0071, Dockerfile
+          # findings) are rated high/medium by the normalize adapters'
+          # severity mapping (shell injection -> high, unsafe block ->
+          # medium, RUSTSEC-2020-0071's CVSS 6.2 -> medium, checkov's
+          # severity-less CKV_DOCKER_* findings -> medium) -- and
+          # gitleaks' own default allowlist does not flag the well-known
+          # AWS example key used in src/stats.rs. The default "high"
+          # threshold would already deny on the SAST finding alone;
+          # lowering the blocking threshold to "medium" (still the bundled
+          # default policy, no custom policy file) is what additionally
+          # makes the gate deny on the medium-rated SCA and config
+          # findings too; see README.md for the exact reasons observed.
+          fail-on-severity: medium
+          # This demo intentionally contains unfixed vulnerabilities (see
+          # README) so the gate is expected to deny deployment. `expect:
+          # deny` makes this step -- and therefore CI -- fail if the gate
+          # ever allows the vulnerable build through, and pass (green) when
+          # it denies as expected.
+          expect: deny
 
       - name: Upload attestation chain & gate decision
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: attestation-artifacts
           path: |
-            chain.json
-            gate-decision.json
+            ${{ runner.temp }}/attestation-chain.json
+            ${{ runner.temp }}/gate-decision.json

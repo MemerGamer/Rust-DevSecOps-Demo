@@ -1,0 +1,63 @@
+rules:
+  - id: rust-shell-injection
+    languages: [rust]
+    severity: ERROR
+    mode: taint
+    message: >-
+      A dynamically formatted string (built with format!) is passed as the
+      command string to `sh -c`. Since `sh -c` interprets its argument as a
+      full shell command line, any interpolated value that an attacker can
+      influence lets them inject arbitrary shell metacharacters and run
+      commands they choose. Build the argument list explicitly instead of
+      shelling out through `sh -c`, or validate/escape every interpolated
+      value before it reaches the shell.
+    metadata:
+      cwe:
+        - "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+      owasp:
+        - "A03:2021 - Injection"
+      references:
+        - https://cwe.mitre.org/data/definitions/78.html
+      category: security
+      confidence: HIGH
+      technology:
+        - rust
+    pattern-sources:
+      - pattern: format!(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CMD.arg("-c").arg($SINK)
+              - pattern: $CMD.arg("-c").args([$SINK, ...])
+              - pattern: $CMD.arg("-c").args([..., $SINK, ...])
+          - focus-metavariable: $SINK
+    pattern-sanitizers:
+      - pattern: '"..."'
+
+  - id: rust-unsafe-from-utf8-unchecked
+    languages: [rust]
+    severity: WARNING
+    message: >-
+      Unnecessary `unsafe` block around from_utf8_unchecked/from_raw_parts.
+      These functions skip UTF-8 validation and bounds checks; if the
+      underlying bytes are not guaranteed valid UTF-8 this is undefined
+      behavior, and if they already come from a &str (as here) the unsafe
+      block buys nothing over the safe, validating equivalents
+      (std::str::from_utf8, ordinary slicing). Remove the unsafe block and
+      use the safe API unless the invariant is proven and documented.
+    metadata:
+      cwe:
+        - "CWE-704: Incorrect Type Conversion or Cast"
+      references:
+        - https://doc.rust-lang.org/std/str/fn.from_utf8_unchecked.html
+      category: security
+      confidence: MEDIUM
+      technology:
+        - rust
+    patterns:
+      - pattern-inside: |
+          unsafe { ... }
+      - pattern-either:
+          - pattern: std::str::from_utf8_unchecked(...)
+          - pattern: str::from_utf8_unchecked(...)
+          - pattern: std::slice::from_raw_parts(...)

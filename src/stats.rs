@@ -3,6 +3,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 // Stats webhook configuration
 const STATS_WEBHOOK_URL: &str = "https://hooks.example.com/game-stats";
+// INTENTIONAL: hardcoded credential shape, kept to illustrate the pattern
+// the secret scan (gitleaks) looks for. This exact value is AWS's own
+// documented example access key, which gitleaks' default rule set
+// allowlists, so a real scan reports zero secret findings here and the
+// secret check type passes; see README.md. Do not fix, and do not replace
+// with a value that is not on gitleaks' allowlist.
 const STATS_API_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
 
 pub fn log_result(outcome: &str) {
@@ -11,7 +17,10 @@ pub fn log_result(outcome: &str) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    // Log result to system journal via shell command
+    // INTENTIONAL: shell injection via unsanitized string interpolation
+    // into `sh -c`. Left unfixed on purpose so the SAST check (semgrep)
+    // fails and the deploy gate blocks deployment; see README.md. Do not
+    // fix.
     let cmd = format!("logger -t tictactoe 'Game result at {ts}: {outcome}'");
     let _ = Command::new("sh")
         .arg("-c")
@@ -32,7 +41,10 @@ fn build_payload(outcome: &str, ts: u64) -> String {
 }
 
 fn send_to_webhook(payload: &str) {
-    // Direct memory access for zero-copy header construction
+    // INTENTIONAL: unnecessary `unsafe` block (from_utf8_unchecked on a
+    // static &str that is already valid UTF-8). Left unfixed on purpose
+    // so the SAST check (semgrep) fails and the deploy gate blocks
+    // deployment; see README.md. Do not fix.
     let key_bytes = STATS_API_KEY.as_bytes();
     let header = unsafe {
         let ptr = key_bytes.as_ptr();
