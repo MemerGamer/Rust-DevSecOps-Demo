@@ -4,61 +4,63 @@
 # If no job is given, runs all jobs in order.
 #
 # The deploy-gate job pulls its logic from the composite actions in
-# MemerGamer/devsecops-attestation/actions (setup, normalize-sign, gate) at
-# tag v0.4.0, instead of cloning and building this repo's own copy of the
-# CLI. Until that tag is published on GitHub, act cannot even resolve the
-# `uses:` reference -- a real `act` run against this workflow today fails
-# with:
+# MemerGamer/devsecops-attestation/actions (setup, normalize-sign, gate),
+# pinned to the commit SHA of the published v0.4.0 release, instead of
+# cloning and building this repo's own copy of the CLI. Since that release
+# exists on GitHub, act resolves the `uses:` reference over the network like
+# any other action, and deploy-gate runs end-to-end under act with no extra
+# flags, given network access to GitHub Releases (for the CLI binaries) and
+# the cosign Sigstore transparency log (for checksum verification).
 #
-#   Unable to resolve action `MemerGamer/devsecops-attestation/actions/
-#   setup@v0.4.0`, unable to find version `v0.4.0`
-#
-# before `actions/setup` (or its download logic) ever runs. This is not the
-# same failure as `actions/setup` 404ing while trying to download a release
-# archive -- resolution of the action *definition* fails first.
-#
-# This script works around that by passing act's --local-repository flag
-# (added in act v0.2.60) automatically whenever a local devsecops-attestation
-# checkout is found at $ATTESTATION_SRC (default: ../devsecops-attestation
-# next to this repository), mapping every
-# MemerGamer/devsecops-attestation/actions/*@v0.4.0 reference to that local
-# checkout instead of asking GitHub to resolve it:
+# This script additionally passes act's --local-repository flag (added in
+# act v0.2.60) whenever a local devsecops-attestation checkout is found at
+# $ATTESTATION_SRC (default: ../devsecops-attestation next to this
+# repository), mapping every MemerGamer/devsecops-attestation/actions/*
+# reference pinned to that release's commit SHA to that local checkout's
+# action definitions instead of asking GitHub to resolve them:
 #
 #   act push -e push.json \
-#     --local-repository MemerGamer/devsecops-attestation@v0.4.0="$ATTESTATION_SRC"
+#     --local-repository MemerGamer/devsecops-attestation@<sha>="$ATTESTATION_SRC"
 #
-# IMPORTANT: --local-repository only redirects where the action *definition*
-# (action.yml) is read from. It does not change what setup.sh does once it
-# runs: with `version: 0.4.0` (the version this workflow currently pins),
-# setup.sh still tries to download a v0.4.0 release archive over the
-# network, which does not exist until that tag is actually released. So
-# deploy-gate still cannot complete end-to-end under act, even with
-# --local-repository, unless the workflow's `version:` input is ALSO
-# switched to "source" (which builds the CLI from the checkout instead of
-# downloading anything). To use `version: source`, the setup action's own
-# docs say it requires Go on PATH inside the job that runs it: add an
-# `actions/setup-go` step *before* the `actions/setup` step (this workflow's
-# deploy-gate job does not install Go today, since the default
-# `version: 0.4.0` path only downloads a prebuilt binary and needs no
-# compiler). The `version:` value is a `with:` input on the composite
-# action, fed from the workflow's own YAML, not an event field -- it cannot
-# be overridden via act's -e/--input support. Edit the workflow file
-# temporarily (set `version: source`) to exercise this path locally.
+# This is only useful for testing *unreleased* changes to the composite
+# actions themselves (i.e. editing devsecops-attestation locally and
+# exercising those edits against this workflow before they are tagged and
+# pushed) -- for the pinned v0.4.0 release itself, act needs no such
+# redirect. IMPORTANT: --local-repository only redirects where the action
+# *definition* (action.yml) is read from. It does not change what setup.sh
+# does once it runs: with `version: 0.4.0` (the version this workflow
+# currently pins), setup.sh still downloads the real v0.4.0 release archive
+# over the network regardless of --local-repository. So testing an
+# unreleased local change to setup.sh's own install logic additionally needs
+# the workflow's `version:` input switched to "source" (which builds the CLI
+# from the checkout instead of downloading anything). To use
+# `version: source`, the setup action's own docs say it requires Go on PATH
+# inside the job that runs it: add an `actions/setup-go` step *before* the
+# `actions/setup` step (this workflow's deploy-gate job does not install Go
+# today, since the default `version: 0.4.0` path only downloads a prebuilt
+# binary and needs no compiler). The `version:` value is a `with:` input on
+# the composite action, fed from the workflow's own YAML, not an event
+# field -- it cannot be overridden via act's -e/--input support. Edit the
+# workflow file temporarily (set `version: source`) to exercise this path
+# locally.
 #
-# If your installed act does not support --local-repository (check with
-# `act --help | grep local-repository`) and you have no network access to
-# GitHub, run the scanner jobs (build, sast, sca, config-scan, secret-scan)
-# individually with `-j <job>` -- these do not touch devsecops-attestation at
-# all -- and exercise the deploy-gate logic separately by calling the
-# attest/gate CLIs (built with `go build` from a local devsecops-attestation
-# checkout, see below) directly against this repo's raw scan output, instead
-# of through act.
+# If you have no network access to GitHub at all, run the scanner jobs
+# (build, sast, sca, config-scan, secret-scan) individually with `-j <job>`
+# -- these do not touch devsecops-attestation at all -- and exercise the
+# deploy-gate logic separately by calling the attest/gate CLIs (built with
+# `go build` from a local devsecops-attestation checkout, see below)
+# directly against this repo's raw scan output, instead of through act.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Sibling checkout of devsecops-attestation, overridable for machines where
 # the two repos are not checked out side by side.
 ATTESTATION_SRC="${ATTESTATION_SRC:-$(git -C "$REPO_DIR" rev-parse --show-toplevel)/../devsecops-attestation}"
+# Commit SHA the workflow's MemerGamer/devsecops-attestation/actions/*
+# references are pinned to (the v0.4.0 release). Must match the `uses:` refs
+# in .github/workflows/devsecops-pipeline.yml exactly, since --local-repository
+# below maps by this same ref.
+ATTESTATION_SHA="ed0b603a70a0146264aa91eecfd17d95eccf9d38"
 # BINS_DIR/KEYS_DIR/ARTIFACTS_DIR default to freshly created, randomly named
 # directories (mktemp -d) rather than fixed shared paths like /tmp/act-bins:
 # a fixed, predictable path under a world-writable directory is a symlink /
@@ -171,14 +173,15 @@ JOB="${1:-}"
 # are not available to deploy-gate's download-artifact step.
 ACT_CMD=(act push -e "$PUSH_EVENT_FILE" --artifact-server-path "$ARTIFACTS_DIR")
 
-# Map the pinned MemerGamer/devsecops-attestation/actions/*@v0.4.0 reference
-# to a local checkout whenever one is available, so act does not have to
-# resolve v0.4.0 from GitHub (which does not exist there yet -- see the
-# comment block at the top of this file). This does not by itself make
-# deploy-gate runnable end-to-end under act; see that comment block for the
-# additional `version: source` + actions/setup-go step this still needs.
+# Map the pinned MemerGamer/devsecops-attestation/actions/*@$ATTESTATION_SHA
+# reference to a local checkout whenever one is available, so local edits to
+# the composite actions can be exercised without tagging and pushing a new
+# release first. Since v0.4.0 is published, act can resolve the reference
+# from GitHub on its own even without this -- --local-repository is only
+# needed here for testing unreleased action changes (see the comment block
+# at the top of this file).
 if [ -d "$ATTESTATION_SRC" ]; then
-  ACT_CMD+=(--local-repository "MemerGamer/devsecops-attestation@v0.4.0=$ATTESTATION_SRC")
+  ACT_CMD+=(--local-repository "MemerGamer/devsecops-attestation@$ATTESTATION_SHA=$ATTESTATION_SRC")
 fi
 
 if [ -n "$JOB" ]; then
@@ -188,13 +191,14 @@ else
   echo "Running full pipeline..."
   if [ ! -d "$ATTESTATION_SRC" ]; then
     echo "NOTE: ATTESTATION_SRC ($ATTESTATION_SRC) not found, so"
-    echo "--local-repository is not being passed; the deploy-gate job needs"
-    echo "network access to GitHub to resolve"
-    echo "MemerGamer/devsecops-attestation/actions/*@v0.4.0 instead."
+    echo "--local-repository is not being passed; the deploy-gate job will"
+    echo "resolve MemerGamer/devsecops-attestation/actions/*@$ATTESTATION_SHA"
+    echo "from GitHub over the network instead."
   else
-    echo "NOTE: even with --local-repository, deploy-gate cannot complete"
-    echo "under act until v0.4.0 is released, unless version: source is also"
-    echo "used (see the comment block at the top of this script)."
+    echo "NOTE: --local-repository is being passed, redirecting action"
+    echo "definitions to $ATTESTATION_SRC. This only affects unreleased local"
+    echo "edits to the composite actions; see the comment block at the top"
+    echo "of this script for what else 'version: source' needs."
   fi
 fi
 

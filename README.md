@@ -214,30 +214,33 @@ bash scripts/act-debug.sh
 ```
 
 The `deploy-gate` job resolves `MemerGamer/devsecops-attestation/actions/*`
-composite actions from GitHub at the tag `v0.4.0`. Before that tag is
-published, act cannot resolve the reference at all -- a real `act` run
-against this workflow today fails with `Unable to resolve action
-...MemerGamer/devsecops-attestation/actions/setup@v0.4.0, unable to find
-version v0.4.0`, before `actions/setup` (or its download logic) ever runs.
-`scripts/act-debug.sh` works around this by passing act's
-`--local-repository` flag automatically whenever a local
-`devsecops-attestation` checkout is available (via the `ATTESTATION_SRC`
-environment variable, defaulting to `../devsecops-attestation` next to this
-repository), which maps the `uses:` reference to that local checkout
-instead of asking GitHub to resolve it. `--local-repository` only redirects
-where the action *definition* (`action.yml`) is read from, though -- it does
+composite actions from GitHub at the pinned commit SHA of the published
+`v0.4.0` release. Since that release exists on GitHub, act can resolve the
+reference over the network like any other action, and `deploy-gate` runs
+end-to-end under `act` with no extra flags, as long as `verify-signature`
+and network access to GitHub Releases (for the CLI binaries) and the cosign
+Sigstore transparency log (for checksum verification) are available.
+`scripts/act-debug.sh` additionally passes act's `--local-repository` flag
+whenever a local `devsecops-attestation` checkout is available (via the
+`ATTESTATION_SRC` environment variable, defaulting to
+`../devsecops-attestation` next to this repository), which redirects the
+`uses:` reference to that local checkout's action definitions instead of
+asking GitHub to resolve them. This is only useful for testing *unreleased*
+changes to the composite actions themselves (i.e. editing
+`devsecops-attestation` locally and exercising those edits against this
+workflow before they are tagged and pushed) -- `--local-repository` only
+redirects where the action *definition* (`action.yml`) is read from, it does
 not change what `setup.sh` itself does once it runs. With the workflow's
-default `version: 0.4.0`, `setup.sh` still tries to download a v0.4.0
-release archive over the network, which does not exist until that tag is
-actually released, so `deploy-gate` still cannot complete end-to-end under
-`act` even with `--local-repository` unless the workflow's `version:` input
-is also switched to `source` (which builds the CLI from the checkout
-instead of downloading anything, and needs Go on `PATH` inside the job --
-add an `actions/setup-go` step before `actions/setup`, since the default
-`version: 0.4.0` path needs no compiler and this workflow does not install
-Go today). The scanner jobs (`build`, `sast`, `sca`, `config-scan`,
-`secret-scan`) do not depend on devsecops-attestation at all and run fine
-under `act` on their own, e.g. `bash scripts/act-debug.sh sast`.
+default `version: 0.4.0`, `setup.sh` still downloads the real v0.4.0 release
+archive over the network regardless of `--local-repository`, so testing an
+unreleased local change to `setup.sh`'s own install logic additionally needs
+the workflow's `version:` input switched to `source` (which builds the CLI
+from the checkout instead of downloading anything, and needs Go on `PATH`
+inside the job -- add an `actions/setup-go` step before `actions/setup`,
+since the default `version: 0.4.0` path needs no compiler and this workflow
+does not install Go today). The scanner jobs (`build`, `sast`, `sca`,
+`config-scan`, `secret-scan`) do not depend on devsecops-attestation at all
+and run fine under `act` on their own, e.g. `bash scripts/act-debug.sh sast`.
 
 `scripts/act-debug.sh` requires a `.secrets` file (generated automatically
 from a local devsecops-attestation checkout, or write your own from the

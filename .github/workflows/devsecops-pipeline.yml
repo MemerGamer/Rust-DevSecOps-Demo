@@ -15,10 +15,12 @@ env:
   # bump the pinned action SHAs in this file automatically, but it does not
   # know about DEVSECOPS_ATTESTATION_VERSION or GITLEAKS_LINUX_X64_SHA256
   # below -- those are plain env values, not `uses:` references, so
-  # dependabot never touches them. When bumping DEVSECOPS_ATTESTATION_VERSION
-  # (or the `@v0.4.0` refs on the MemerGamer/devsecops-attestation/actions/*
-  # steps further down), bump all of them together by hand; a mismatch
-  # between the version string and the action refs is a silent footgun.
+  # dependabot never touches them. The SHA and version must be bumped
+  # together by hand: DEVSECOPS_ATTESTATION_VERSION, the
+  # `@<sha> # v0.4.0` refs on the MemerGamer/devsecops-attestation/actions/*
+  # steps further down, and the `version:` input passed to each of those
+  # steps all have to name the same release, or the action definitions
+  # resolved by SHA will not match the CLI version those steps request.
   # Re-resolve SEMGREP_VERSION/CHECKOV_VERSION/CARGO_AUDIT_VERSION from
   # pypi.org/crates.io when bumping by hand.
   SEMGREP_VERSION: "1.177.0"
@@ -329,8 +331,7 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      # Pin to the release commit SHA once v0.4.0 is published
-      - uses: MemerGamer/devsecops-attestation/actions/setup@v0.4.0
+      - uses: MemerGamer/devsecops-attestation/actions/setup@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
         with:
           version: ${{ env.DEVSECOPS_ATTESTATION_VERSION }}
           verify-signature: "true"
@@ -343,7 +344,7 @@ jobs:
       # for high/medium findings that the gate then denies on, an
       # inconsistency between what was attested and what was enforced.
       - name: Normalize and sign SAST attestation
-        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@v0.4.0
+        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
         with:
           tool: semgrep
           raw-result: raw/sast/semgrep-raw.json
@@ -352,7 +353,7 @@ jobs:
           fail-on: medium
 
       - name: Normalize and sign SCA attestation
-        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@v0.4.0
+        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
         with:
           tool: cargo-audit
           raw-result: raw/sca/cargo-audit-raw.json
@@ -361,7 +362,7 @@ jobs:
           fail-on: medium
 
       - name: Normalize and sign config attestation
-        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@v0.4.0
+        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
         with:
           tool: checkov
           raw-result: raw/config/checkov-raw.json
@@ -370,7 +371,7 @@ jobs:
           fail-on: medium
 
       - name: Normalize and sign secret scan attestation
-        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@v0.4.0
+        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
         with:
           tool: gitleaks
           raw-result: raw/secret/gitleaks-raw.json
@@ -379,7 +380,7 @@ jobs:
           fail-on: medium
 
       - name: Evaluate deploy gate
-        uses: MemerGamer/devsecops-attestation/actions/gate@v0.4.0
+        uses: MemerGamer/devsecops-attestation/actions/gate@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
         with:
           chain: ${{ runner.temp }}/attestation-chain.json
           authorized-signers: >-
