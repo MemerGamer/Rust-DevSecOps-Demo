@@ -338,10 +338,12 @@ jobs:
 
       # fail-on is set to medium on every normalize-sign step below so the
       # recorded normalization outcome matches the deploy gate's
-      # fail-on-severity: medium (see the gate step further down). The
-      # normalize-sign action defaults fail-on to critical; leaving that
-      # default in place here would sign attestations with passed: true
-      # for high/medium findings that the gate then denies on, an
+      # fail-on-severity: medium (see the gate step further down).
+      # normalize-sign already defaults fail-on to high, which is enough on
+      # its own for the SAST step's high-severity command-injection finding;
+      # leaving that default in place on the SCA and config steps would
+      # sign attestations with passed: true for their medium findings that
+      # the gate (also lowered to medium below) then denies on, an
       # inconsistency between what was attested and what was enforced.
       - name: Normalize and sign SAST attestation
         uses: MemerGamer/devsecops-attestation/actions/normalize-sign@ed0b603a70a0146264aa91eecfd17d95eccf9d38 # v0.4.0
@@ -397,18 +399,19 @@ jobs:
           # deploy.rego file actions/setup separately installs alongside
           # the binaries for callers who do want to pin/hash a policy file.
           # That compiled-in default policy's blocking severity threshold
-          # is "critical". This demo's intentional issues (command
-          # injection, unnecessary unsafe block, RUSTSEC-2020-0071,
-          # Dockerfile findings) are real but rated high/medium, not
-          # critical, by the normalize adapters' severity mapping (shell
-          # injection -> high, unsafe block -> medium, RUSTSEC-2020-0071's
-          # CVSS 6.2 -> medium, checkov's severity-less CKV_DOCKER_*
-          # findings -> medium) -- and gitleaks' own default allowlist does
-          # not flag the well-known AWS example key used in src/stats.rs.
-          # Lowering the blocking threshold to "medium" (still the bundled
-          # default policy, no custom policy file) is what actually makes
-          # the gate deny on these findings; see README.md for the exact
-          # reasons observed.
+          # is "high". This demo's intentional issues (command injection,
+          # unnecessary unsafe block, RUSTSEC-2020-0071, Dockerfile
+          # findings) are rated high/medium by the normalize adapters'
+          # severity mapping (shell injection -> high, unsafe block ->
+          # medium, RUSTSEC-2020-0071's CVSS 6.2 -> medium, checkov's
+          # severity-less CKV_DOCKER_* findings -> medium) -- and
+          # gitleaks' own default allowlist does not flag the well-known
+          # AWS example key used in src/stats.rs. The default "high"
+          # threshold would already deny on the SAST finding alone;
+          # lowering the blocking threshold to "medium" (still the bundled
+          # default policy, no custom policy file) is what additionally
+          # makes the gate deny on the medium-rated SCA and config
+          # findings too; see README.md for the exact reasons observed.
           fail-on-severity: medium
           # This demo intentionally contains unfixed vulnerabilities (see
           # README) so the gate is expected to deny deployment. `expect:

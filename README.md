@@ -62,21 +62,24 @@ the gate binary itself** (the bundled default deploy policy) -- not a
 repository-local policy file, and not the separate `deploy.rego` file
 `actions/setup` installs alongside the binaries for callers who do want to
 pin/hash a policy file with `--policy-hash`. That compiled-in default
-policy's blocking severity threshold is `critical`, and none of this demo's
-issues are
-scored that high by the normalize adapters: semgrep's `ERROR` maps to
-`high` and its `WARNING` to `medium`; RUSTSEC-2020-0071's CVSS 6.2 vector
-maps to `medium`, not `high`; checkov's Dockerfile checks (`CKV_DOCKER_*`)
-report no severity of their own, and a null severity normalizes to
-`medium`. The `deploy-gate` job therefore passes `fail-on-severity: medium`
-to `actions/gate` to lower the blocking threshold -- still the bundled
-policy, just a stricter threshold -- so these real, non-critical-but-real
-findings actually block deployment. Each `normalize-sign` step also passes
-`fail-on: medium`, matching the gate's threshold, so the `passed` field
-recorded in each signed attestation agrees with what the gate ultimately
-decides; `normalize-sign` defaults `fail-on` to `critical`, and leaving that
-default in place would have signed `passed: true` attestations for findings
-the gate then denies on.
+policy's blocking severity threshold is `high`, and semgrep's `ERROR`-level
+command-injection finding already scores that high by the normalize
+adapters' mapping: semgrep's `ERROR` maps to `high` and its `WARNING` to
+`medium`; RUSTSEC-2020-0071's CVSS 6.2 vector maps to `medium`, not `high`;
+checkov's Dockerfile checks (`CKV_DOCKER_*`) report no severity of their
+own, and a null severity normalizes to `medium`. So the default `high`
+threshold alone would already deny on the SAST finding. The `deploy-gate`
+job additionally passes `fail-on-severity: medium` to `actions/gate` to
+lower the blocking threshold further -- still the bundled policy, just a
+stricter threshold -- so the medium-rated SCA (RUSTSEC-2020-0071) and
+config (checkov) findings also block deployment, which is why the deny
+reasons list `sast`, `sca`, and `config`. Each `normalize-sign` step also
+passes `fail-on: medium`, matching the gate's threshold, so the `passed`
+field recorded in each signed attestation agrees with what the gate
+ultimately decides; `normalize-sign` already defaults `fail-on` to `high`,
+but leaving that default in place on the SCA and config steps would have
+signed `passed: true` attestations for their medium findings that the gate
+then denies on.
 
 Also note: gitleaks' own default rule set allowlists the specific example
 key used here (`AKIAIOSFODNN7EXAMPLE` is AWS's documented placeholder
@@ -217,9 +220,10 @@ The `deploy-gate` job resolves `MemerGamer/devsecops-attestation/actions/*`
 composite actions from GitHub at the pinned commit SHA of the published
 `v0.4.0` release. Since that release exists on GitHub, act can resolve the
 reference over the network like any other action, and `deploy-gate` runs
-end-to-end under `act` with no extra flags, as long as `verify-signature`
-and network access to GitHub Releases (for the CLI binaries) and the cosign
-Sigstore transparency log (for checksum verification) are available.
+end-to-end under `act` with no extra flags, as long as `actions/setup`'s
+`verify-signature` check can reach the network -- GitHub Releases (for the
+CLI binaries) and the cosign Sigstore transparency log (for checksum
+verification) both need to be available.
 `scripts/act-debug.sh` additionally passes act's `--local-repository` flag
 whenever a local `devsecops-attestation` checkout is available (via the
 `ATTESTATION_SRC` environment variable, defaulting to
