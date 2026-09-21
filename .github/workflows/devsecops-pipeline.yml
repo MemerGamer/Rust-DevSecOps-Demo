@@ -11,13 +11,26 @@ permissions:
 
 env:
   # Versions resolved from the upstream package indexes at the time this
-  # workflow was last updated. Bump alongside dependabot's github-actions
-  # ecosystem updates; re-resolve from pypi.org/crates.io when bumping by
-  # hand.
+  # workflow was last updated. Dependabot's github-actions ecosystem updates
+  # bump the pinned action SHAs in this file automatically, but it does not
+  # know about DEVSECOPS_ATTESTATION_VERSION or GITLEAKS_LINUX_X64_SHA256
+  # below -- those are plain env values, not `uses:` references, so
+  # dependabot never touches them. When bumping DEVSECOPS_ATTESTATION_VERSION
+  # (or the `@v0.4.0` refs on the MemerGamer/devsecops-attestation/actions/*
+  # steps further down), bump all of them together by hand; a mismatch
+  # between the version string and the action refs is a silent footgun.
+  # Re-resolve SEMGREP_VERSION/CHECKOV_VERSION/CARGO_AUDIT_VERSION from
+  # pypi.org/crates.io when bumping by hand.
   SEMGREP_VERSION: "1.177.0"
   CHECKOV_VERSION: "3.3.19"
   CARGO_AUDIT_VERSION: "0.22.2"
   GITLEAKS_VERSION: "8.30.1"
+  # SHA256 of gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz, taken from that
+  # release's own gitleaks_${GITLEAKS_VERSION}_checksums.txt and hard-coded
+  # here so the install step below verifies the downloaded archive against a
+  # value that was not fetched from the same download as the checksums file
+  # itself. Update this alongside GITLEAKS_VERSION.
+  GITLEAKS_LINUX_X64_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
   DEVSECOPS_ATTESTATION_VERSION: "0.4.0"
 
 jobs:
@@ -30,6 +43,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable (branch ref, pinned to commit)
@@ -63,6 +78,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install semgrep
         run: pip install "semgrep==${SEMGREP_VERSION}" --quiet
@@ -70,18 +87,19 @@ jobs:
       - name: Run semgrep
         run: |
           mkdir -p results
-          # Semgrep exits non-zero when it finds issues; that must not fail
-          # this job (findings are a policy question for the deploy gate),
-          # but a missing/empty output file means the scan itself broke and
-          # must fail closed.
+          # By default semgrep exits 0 even when rules match; a non-zero
+          # exit means the scan itself errored (bad config, parse failure),
+          # not that findings were found, so no `|| true` is needed to keep
+          # findings from failing this job. A missing/empty output file
+          # still means the scan broke and must fail closed.
           #
           # --config=auto is nondeterministic (it resolves a rule set from
           # the Semgrep Registry at request time) and does not reliably
-          # flag this demo's intentional Rust issues. Use the repo-local
-          # rules in .semgrep/ (written to match this demo's exact code)
-          # plus the pinned p/rust registry pack instead, and disable
-          # anonymous usage metrics for a fully deterministic run.
-          semgrep --config .semgrep/ --config p/rust --json --metrics=off --output results/semgrep-raw.json . || true
+          # flag this demo's intentional Rust issues. Use only the
+          # repo-local rules in .semgrep/ (written to match this demo's
+          # exact code), and disable anonymous usage metrics, for a scan
+          # that is fully deterministic for a given semgrep version.
+          semgrep --config .semgrep/ --json --metrics=off --output results/semgrep-raw.json .
           test -s results/semgrep-raw.json || {
             echo "::error::semgrep produced no output (results/semgrep-raw.json missing or empty)"
             exit 1
@@ -103,6 +121,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Prebuilt binary install instead of `cargo install --locked`: avoids
       # a from-source compile of cargo-audit on every run and the cache
@@ -141,6 +161,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install checkov
         run: pip install "checkov==${CHECKOV_VERSION}" --quiet
@@ -177,7 +199,13 @@ jobs:
     needs: build
 
     steps:
+      # fetch-depth: 0 so gitleaks scans full commit history, not just the
+      # checked-out tree -- a secret introduced and later removed in a
+      # prior commit is still a leak.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
 
       - name: Install gitleaks (pinned, checksum-verified)
         run: |
@@ -186,7 +214,16 @@ jobs:
           base_url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
           curl -fsSL -o "${archive}" "${base_url}/${archive}"
           curl -fsSL -o checksums.txt "${base_url}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          # Verify against both the same-origin checksums file AND the
+          # SHA256 hard-coded in GITLEAKS_LINUX_X64_SHA256 above (taken from
+          # this same checksums file ahead of time and cross-checked by
+          # hand). A checksums file fetched from the same release is not an
+          # independent check on its own -- if the release itself were
+          # compromised, both the archive and its checksums file would be
+          # compromised together. The hard-coded value pins what this
+          # workflow trusts, independent of whatever the download returns.
           grep -F " ${archive}" checksums.txt | sha256sum -c -
+          echo "${GITLEAKS_LINUX_X64_SHA256}  ${archive}" | sha256sum -c -
           tar -xzf "${archive}" gitleaks
           chmod +x gitleaks
           sudo mv gitleaks /usr/local/bin/gitleaks
@@ -219,29 +256,84 @@ jobs:
     runs-on: ubuntu-latest
     needs: [sast, sca, config-scan, secret-scan]
     environment: production
-    # Dependabot-triggered runs (both PRs opened by dependabot and, on some
-    # event configurations, pushes it makes) do not receive repository
-    # secrets, so the *_SIGNING_KEY inputs below would be empty and
-    # normalize-sign would fail on every dependabot run for a reason that
-    # has nothing to do with the security findings. The four scanner jobs
-    # above still run and upload their raw results either way; only the
-    # signing/gate step is skipped for dependabot's own runs.
-    if: github.actor != 'dependabot[bot]'
+    # The chain and gate decision files are written under runner.temp (see
+    # the steps below) instead of the workspace: this job does not check
+    # out the repository, since nothing it does -- downloading raw scan
+    # results, signing them, and evaluating the bundled default policy --
+    # reads any file from this repository. runner.temp is not available in
+    # job-level `env:` (only in step context), so the path is repeated as
+    # `${{ runner.temp }}/...` in each step below rather than centralized
+    # in one env var.
+    # Skip the deploy-gate job (but not the four scanner jobs above, which
+    # always run and upload their raw results regardless) whenever
+    # repository secrets would not be available to it:
+    #
+    #   - github.actor != 'dependabot[bot]': GitHub Actions withholds
+    #     repository secrets from workflow runs triggered by a dependabot
+    #     pull request, so the *_SIGNING_KEY inputs below would be empty and
+    #     normalize-sign would fail for a reason unrelated to any security
+    #     finding. (Dependabot's own commits are pushed to dependabot/*
+    #     branches, which this workflow's `push:` trigger above does not
+    #     match -- only [main, develop] -- so in practice only the
+    #     pull_request case ever reaches this condition for dependabot.)
+    #   - the pull_request.head.repo.full_name check: GitHub Actions
+    #     likewise withholds repository secrets from pull_request runs
+    #     whose head branch lives in a fork rather than this repository,
+    #     for the same reason a fork PR author must not be able to read
+    #     the signing keys through a modified workflow file. Without this
+    #     check, deploy-gate would attempt to sign with empty keys and fail
+    #     on every fork PR for a reason unrelated to security findings.
+    #     `github.event_name != 'pull_request'` makes this half of the
+    #     condition a no-op for push events, which have no pull_request
+    #     context to compare.
+    if: github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Download all scan raw results
+      - name: Download SAST raw result
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: "*-raw"
-          path: results/
-          merge-multiple: true
+          name: sast-raw
+          path: raw/sast
+
+      - name: Download SCA raw result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sca-raw
+          path: raw/sca
+
+      - name: Download config scan raw result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: config-raw
+          path: raw/config
+
+      - name: Download secret scan raw result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: secret-raw
+          path: raw/secret
+
+      # Each raw result is downloaded into its own directory above (rather
+      # than a single directory via `pattern` + `merge-multiple`) so a
+      # same-named file from one check type can never silently overwrite
+      # another's before normalize-sign reads it.
+
+      # cosign-installer puts cosign on PATH so the setup step below can
+      # verify the devsecops-attestation release checksums.txt against its
+      # cosign keyless signature and certificate before trusting it --
+      # i.e. before installing the attest/verify/gate binaries that go on
+      # to receive the *_SIGNING_KEY secrets further down. Pinned to the
+      # sigstore/cosign-installer v4.1.2 tag commit (latest v4 release at
+      # the time this workflow was last updated; resolved via
+      # `git ls-remote --tags https://github.com/sigstore/cosign-installer`).
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       # Pin to the release commit SHA once v0.4.0 is published
       - uses: MemerGamer/devsecops-attestation/actions/setup@v0.4.0
         with:
           version: ${{ env.DEVSECOPS_ATTESTATION_VERSION }}
+          verify-signature: "true"
 
       # fail-on is set to medium on every normalize-sign step below so the
       # recorded normalization outcome matches the deploy gate's
@@ -254,42 +346,42 @@ jobs:
         uses: MemerGamer/devsecops-attestation/actions/normalize-sign@v0.4.0
         with:
           tool: semgrep
-          raw-result: results/semgrep-raw.json
+          raw-result: raw/sast/semgrep-raw.json
           signing-key: ${{ secrets.SAST_SIGNING_KEY }}
-          chain: attestation-chain.json
+          chain: ${{ runner.temp }}/attestation-chain.json
           fail-on: medium
 
       - name: Normalize and sign SCA attestation
         uses: MemerGamer/devsecops-attestation/actions/normalize-sign@v0.4.0
         with:
           tool: cargo-audit
-          raw-result: results/cargo-audit-raw.json
+          raw-result: raw/sca/cargo-audit-raw.json
           signing-key: ${{ secrets.SCA_SIGNING_KEY }}
-          chain: attestation-chain.json
+          chain: ${{ runner.temp }}/attestation-chain.json
           fail-on: medium
 
       - name: Normalize and sign config attestation
         uses: MemerGamer/devsecops-attestation/actions/normalize-sign@v0.4.0
         with:
           tool: checkov
-          raw-result: results/checkov-raw.json
+          raw-result: raw/config/checkov-raw.json
           signing-key: ${{ secrets.CONFIG_SIGNING_KEY }}
-          chain: attestation-chain.json
+          chain: ${{ runner.temp }}/attestation-chain.json
           fail-on: medium
 
       - name: Normalize and sign secret scan attestation
         uses: MemerGamer/devsecops-attestation/actions/normalize-sign@v0.4.0
         with:
           tool: gitleaks
-          raw-result: results/gitleaks-raw.json
+          raw-result: raw/secret/gitleaks-raw.json
           signing-key: ${{ secrets.SECRET_SCANNING_SIGNING_KEY }}
-          chain: attestation-chain.json
+          chain: ${{ runner.temp }}/attestation-chain.json
           fail-on: medium
 
       - name: Evaluate deploy gate
         uses: MemerGamer/devsecops-attestation/actions/gate@v0.4.0
         with:
-          chain: attestation-chain.json
+          chain: ${{ runner.temp }}/attestation-chain.json
           authorized-signers: >-
             sast=${{ secrets.SAST_PUBLIC_KEY }},
             sca=${{ secrets.SCA_PUBLIC_KEY }},
@@ -297,21 +389,25 @@ jobs:
             secret=${{ secrets.SECRET_SCANNING_PUBLIC_KEY }}
           max-age: 24h
           require-log-entries: "true"
-          output: gate-decision.json
-          # The bundled default policy's blocking threshold is "critical".
-          # This demo's intentional issues (command injection, unnecessary
-          # unsafe block, RUSTSEC-2020-0071, Dockerfile findings) are real
-          # but rated high/medium, not critical, by the normalize adapters'
-          # severity mapping (shell injection -> high, unsafe block ->
-          # medium, RUSTSEC-2020-0071's CVSS 6.2 -> medium, checkov's
-          # severity-less CKV_DOCKER_* findings -> medium) -- and gitleaks'
-          # own default allowlist does not flag the well-known AWS example
-          # key used in src/stats.rs. Lowering the blocking threshold to
-          # "medium" (still the bundled policy, no custom policy file) is
-          # what actually makes the gate deny on these findings; see
-          # README.md for the exact reasons observed (both a
-          # "failed checks" reason and a finding-count reason, count not
-          # pinned since it depends on scanner/ruleset versions).
+          output: ${{ runner.temp }}/gate-decision.json
+          # No `policy:` input is set, so `gate evaluate` runs without a
+          # `--policy` flag and falls back to the policy compiled into the
+          # gate binary itself (the bundled default policy), not the
+          # deploy.rego file actions/setup separately installs alongside
+          # the binaries for callers who do want to pin/hash a policy file.
+          # That compiled-in default policy's blocking severity threshold
+          # is "critical". This demo's intentional issues (command
+          # injection, unnecessary unsafe block, RUSTSEC-2020-0071,
+          # Dockerfile findings) are real but rated high/medium, not
+          # critical, by the normalize adapters' severity mapping (shell
+          # injection -> high, unsafe block -> medium, RUSTSEC-2020-0071's
+          # CVSS 6.2 -> medium, checkov's severity-less CKV_DOCKER_*
+          # findings -> medium) -- and gitleaks' own default allowlist does
+          # not flag the well-known AWS example key used in src/stats.rs.
+          # Lowering the blocking threshold to "medium" (still the bundled
+          # default policy, no custom policy file) is what actually makes
+          # the gate deny on these findings; see README.md for the exact
+          # reasons observed.
           fail-on-severity: medium
           # This demo intentionally contains unfixed vulnerabilities (see
           # README) so the gate is expected to deny deployment. `expect:
@@ -326,5 +422,5 @@ jobs:
         with:
           name: attestation-artifacts
           path: |
-            attestation-chain.json
-            gate-decision.json
+            ${{ runner.temp }}/attestation-chain.json
+            ${{ runner.temp }}/gate-decision.json

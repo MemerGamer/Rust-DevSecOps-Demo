@@ -20,7 +20,7 @@ cryptographically in the attestation chain.
 
 | Check | Tool | Issue introduced | Severity |
 |-------|------|-----------------|----------|
-| SAST | semgrep (repo-local rules in `.semgrep/demo.yml` + `p/rust`) | Shell injection (unsanitized `format!` into `sh -c`) + unnecessary `unsafe` block in `stats.rs` | high (shell injection) / medium (unsafe block) / low (generic `p/rust` unsafe-usage note) |
+| SAST | semgrep (repo-local rules in `.semgrep/demo.yml` only) | Shell injection (unsanitized `format!` into `sh -c`) + unnecessary `unsafe` block around `from_raw_parts`/`from_utf8_unchecked` in `stats.rs` | high (shell injection) / medium (two `unsafe`-block findings, one per flagged line) |
 | SCA | cargo-audit | `time = "0.1"` -- RUSTSEC-2020-0071 (CVSS 6.2) | medium |
 | Config | Checkov | Dockerfile: no `USER`, no `HEALTHCHECK`, `EXPOSE 22` | medium (checkov's Dockerfile checks report no severity of their own; the normalize adapter maps a null severity to medium) |
 | Secret | Gitleaks | Hardcoded AWS-shaped key `AKIAIOSFODNN7EXAMPLE` in `stats.rs` | n/a (see note below) |
@@ -35,21 +35,33 @@ demo's exact code, `.semgrep/demo.yml`:
 
 - `rust-shell-injection` (severity `ERROR`, normalizes to `high`): flags a
   `format!`-built string reaching `Command::new("sh").arg("-c").arg(...)`
-  (command/shell injection, CWE-78).
+  (command/shell injection, CWE-78). Matches once, on the `format!` call in
+  `stats.rs`.
 - `rust-unsafe-from-utf8-unchecked` (severity `WARNING`, normalizes to
   `medium`): flags `unsafe` blocks built around
-  `std::str::from_utf8_unchecked` / `std::slice::from_raw_parts`.
+  `std::str::from_utf8_unchecked` / `std::slice::from_raw_parts`. The
+  `unsafe` block in `stats.rs` calls both functions, so this rule matches
+  twice -- once per flagged line -- for two medium findings.
 
-These run alongside the community `p/rust` registry pack (which separately
-reports the same `unsafe` block as an `INFO`-severity, low-normalized,
-generic finding) instead of `--config=auto`, which resolves a rule set from
-the Semgrep Registry at request time and is not deterministic across runs.
+The workflow runs only these repo-local rules (`--config .semgrep/`), not
+`--config=auto` and not a registry pack such as `p/rust`. Registry packs are
+resolved from the Semgrep Registry over the network at scan time and are not
+pinned to a version, so which rules run (and therefore which findings
+appear) can change between runs without any change to this repository. The
+repo-local ruleset is fully deterministic for a given semgrep version:
+running the same semgrep version against the same code always produces the
+same three findings.
 
 ### Expected deny reasons
 
-The devsecops-attestation composite actions run the **bundled default deploy
-policy** (no repository-local policy file, no `--policy-hash`). That policy's
-blocking severity threshold is `critical`, and none of this demo's issues are
+The `actions/gate` step below sets no `policy:` input, so `gate evaluate`
+runs without a `--policy` flag and falls back to the **policy compiled into
+the gate binary itself** (the bundled default deploy policy) -- not a
+repository-local policy file, and not the separate `deploy.rego` file
+`actions/setup` installs alongside the binaries for callers who do want to
+pin/hash a policy file with `--policy-hash`. That compiled-in default
+policy's blocking severity threshold is `critical`, and none of this demo's
+issues are
 scored that high by the normalize adapters: semgrep's `ERROR` maps to
 `high` and its `WARNING` to `medium`; RUSTSEC-2020-0071's CVSS 6.2 vector
 maps to `medium`, not `high`; checkov's Dockerfile checks (`CKV_DOCKER_*`)
@@ -80,16 +92,24 @@ failed checks: ["sast", "sca", "config"]
 found N finding(s) at or above "medium" severity
 ```
 
-`normalize-sign`'s `fail-on: medium` is what produces the first reason: any
-attestation carrying a medium-or-higher finding is signed with
-`passed: false`, and the gate's Go-level chain verification separately
-reports every check type that failed that way. The second reason comes from
-OPA policy evaluation against `fail-on-severity: medium`. The exact count
-`N` is not pinned here on purpose -- it depends on the installed versions of
-semgrep, cargo-audit, checkov and the `p/rust` registry pack (registry rule
-packs and scanner CVE databases both change over time), so re-running the
-scanners can shift which and how many findings appear without changing
-whether the gate denies. Both reasons cover the SAST, SCA, and config
+Both deny reasons come from **OPA policy evaluation** against the compiled-in
+default policy, not from the gate's earlier Go-level chain verification
+step (signatures, chain linkage, subject consistency, timestamp ordering --
+that step passes cleanly here; nothing about it fails). The first reason,
+`failed checks`, is the policy's `passed == false` rule: `normalize-sign`'s
+`fail-on: medium` on each step above signs an attestation with
+`passed: false` whenever it carries a medium-or-higher finding, and the
+policy denies deployment for every check type recorded that way. The second
+reason, the finding-count line, is the policy's blocking severity-threshold
+rule evaluated against `fail-on-severity: medium` on the `actions/gate`
+step. Both rules are evaluated by OPA against the same signed, verified
+chain -- one flags failing check types, the other counts qualifying
+findings directly -- so the same underlying findings typically produce both
+reasons together. The exact count `N` is not pinned here on purpose -- it
+depends on the installed versions of semgrep, cargo-audit and checkov
+(scanner rule sets and CVE databases both change over time), so
+re-running the scanners can shift which and how many findings appear
+without changing whether the gate denies. Both reasons cover the SAST, SCA, and config
 findings described above; the secret check type passes (see the gitleaks
 note) and does not contribute either reason. CI is **green** when the gate
 denies as expected (`expect: deny` on the `actions/gate` step) and **red**
@@ -102,7 +122,7 @@ if the vulnerable build is ever allowed through.
 ```mermaid
 flowchart TD
     A([Push / PR]) --> B["Build & Test\ncargo build --release · cargo test"]
-    B --> C["SAST\nsemgrep .semgrep/ + p/rust"]
+    B --> C["SAST\nsemgrep .semgrep/ only"]
     B --> D["SCA\ncargo-audit"]
     B --> E["Config Scan\nCheckov"]
     B --> F["Secret Scan\nGitleaks"]
@@ -124,11 +144,18 @@ finding shape happens inside `attest normalize` / `attest sign
 workflow.
 
 The four scanner jobs always run, including on dependabot's own pull
-requests and pushes. The `deploy-gate` job, however, is skipped
-(`if: github.actor != 'dependabot[bot]'`) for those runs: GitHub Actions
-does not expose repository secrets to workflow runs triggered by
-dependabot, so the `*_SIGNING_KEY` inputs would be empty and
+requests. (Dependabot's own commits are pushed to `dependabot/*` branches,
+which this workflow's `push:` trigger does not match -- only `main` and
+`develop` -- so in practice dependabot only ever triggers the
+`pull_request` event here, not `push`.) The `deploy-gate` job is skipped
+for two cases where repository secrets are unavailable to it:
+`github.actor != 'dependabot[bot]'` excludes dependabot pull requests (see
+above), and the `pull_request.head.repo.full_name` check excludes pull
+requests from forks. GitHub Actions withholds repository secrets from both
+kinds of runs, so the `*_SIGNING_KEY` inputs would be empty and
 `normalize-sign` would fail for a reason unrelated to any security finding.
+See the `if:` condition and its comment on the `deploy-gate` job in
+`.github/workflows/devsecops-pipeline.yml` for the exact expression.
 
 ---
 
@@ -159,9 +186,9 @@ done
 | `CONFIG_PUBLIC_KEY` | Contents of `keys/config/public.hex` |
 | `SECRET_SCANNING_PUBLIC_KEY` | Contents of `keys/secret/public.hex` |
 
-The pipeline uses the bundled default deploy policy shipped inside the
-devsecops-attestation release archive (installed by `actions/setup`), so
-there is no policy file to pin or hash in this repository.
+The pipeline sets no `policy:` input on `actions/gate`, so it uses the
+policy compiled into the `gate` binary itself (the bundled default deploy
+policy), not a file this repository would need to pin or hash.
 
 ---
 
@@ -185,26 +212,39 @@ bash scripts/act-debug.sh
 ```
 
 The `deploy-gate` job resolves `MemerGamer/devsecops-attestation/actions/*`
-composite actions from GitHub, and `actions/setup` downloads a release
-archive by default, so a fully offline `act` run needs either network
-access or act's `--local-repository` flag (see the comment block at the top
-of `scripts/act-debug.sh`) pointed at a local checkout via the
-`ATTESTATION_SRC` environment variable (defaults to
-`../devsecops-attestation` next to this repository). Note that
-`--local-repository` only redirects where the action *definition* is read
-from -- it does not stop `actions/setup` from trying to download a v0.4.0
-release archive over the network, so `deploy-gate` cannot complete under
-`act` until that tag is actually released, unless the workflow's
-`version:` input is switched to `source` (which needs Go installed in the
-job via `actions/setup-go` before the `actions/setup` step). The scanner
-jobs (`build`, `sast`, `sca`, `config-scan`, `secret-scan`) do not depend on
-devsecops-attestation at all and run fine under `act` on their own, e.g.
-`bash scripts/act-debug.sh sast`.
+composite actions from GitHub at the tag `v0.4.0`. Before that tag is
+published, act cannot resolve the reference at all -- a real `act` run
+against this workflow today fails with `Unable to resolve action
+...MemerGamer/devsecops-attestation/actions/setup@v0.4.0, unable to find
+version v0.4.0`, before `actions/setup` (or its download logic) ever runs.
+`scripts/act-debug.sh` works around this by passing act's
+`--local-repository` flag automatically whenever a local
+`devsecops-attestation` checkout is available (via the `ATTESTATION_SRC`
+environment variable, defaulting to `../devsecops-attestation` next to this
+repository), which maps the `uses:` reference to that local checkout
+instead of asking GitHub to resolve it. `--local-repository` only redirects
+where the action *definition* (`action.yml`) is read from, though -- it does
+not change what `setup.sh` itself does once it runs. With the workflow's
+default `version: 0.4.0`, `setup.sh` still tries to download a v0.4.0
+release archive over the network, which does not exist until that tag is
+actually released, so `deploy-gate` still cannot complete end-to-end under
+`act` even with `--local-repository` unless the workflow's `version:` input
+is also switched to `source` (which builds the CLI from the checkout
+instead of downloading anything, and needs Go on `PATH` inside the job --
+add an `actions/setup-go` step before `actions/setup`, since the default
+`version: 0.4.0` path needs no compiler and this workflow does not install
+Go today). The scanner jobs (`build`, `sast`, `sca`, `config-scan`,
+`secret-scan`) do not depend on devsecops-attestation at all and run fine
+under `act` on their own, e.g. `bash scripts/act-debug.sh sast`.
 
 `scripts/act-debug.sh` requires a `.secrets` file (generated automatically
 from a local devsecops-attestation checkout, or write your own from the
 table above) before it will run `act`; set `ALLOW_NO_SECRETS=1` to run
-without one on purpose (e.g. when only exercising a scanner job).
+without one on purpose (e.g. when only exercising a scanner job). The
+script writes `.secrets` with `umask 077`, so it is created readable only
+by your own user; it holds the same Ed25519 private keys as the repository
+secrets above and should be treated the same way (never commit it -- it is
+already gitignored).
 
 ---
 
@@ -224,6 +264,50 @@ shorthand, e.g.:
 
 `download-base-url` must be set explicitly on Forgejo since the action's own
 default points at the GitHub release.
+
+---
+
+## Trust boundaries and recommended repository settings
+
+- **Signing keys are repository secrets.** As configured today, any
+  same-repository branch that can edit a workflow file can also read
+  `SAST_SIGNING_KEY`, `SCA_SIGNING_KEY`, `CONFIG_SIGNING_KEY`, and
+  `SECRET_SCANNING_SIGNING_KEY` at run time -- repository secrets are
+  available to any workflow run on a branch of the repository itself
+  (forks and dependabot are excluded by the `deploy-gate` job's `if:`
+  condition, but a same-repo feature branch is not). Recommended
+  hardening: move the eight `*_SIGNING_KEY`/`*_PUBLIC_KEY` secrets from
+  repository secrets into the `production` environment's own secrets, and
+  restrict that environment to `main` with a deployment branch policy (and
+  optionally required reviewers, under **Settings -> Environments ->
+  production**). After that change, PR and feature-branch runs of
+  `deploy-gate` (which references `environment: production`) skip signing
+  entirely rather than exposing the keys, since only runs on `main` are
+  permitted to use the environment's secrets.
+- **Dependabot PRs skip the gate.** The `if:` condition on `deploy-gate`
+  excludes `github.actor == 'dependabot[bot]'` runs (see "Pipeline
+  overview" above), so a dependabot version bump never actually exercises
+  signing or policy evaluation, even though the four scanner jobs still
+  run and upload raw results. To let dependabot PRs exercise the full
+  supply-chain-bump path, add the same eight secrets as [Dependabot
+  secrets](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/configuring-access-to-private-registries-for-dependabot#storing-credentials-for-dependabot-to-use)
+  (**Settings -> Secrets and variables -> Dependabot**) and relax the
+  `if:` condition to stop excluding `dependabot[bot]`. This is a
+  deliberate trade-off the current configuration does not make by default:
+  it grants a bot-authored, auto-merged PR path access to the signing
+  keys.
+- **Signatures attest to what the gate job saw, not to the artifacts in
+  transit.** Each signed attestation proves that the `deploy-gate` job
+  observed a particular raw scanner JSON document (`semgrep-raw.json`,
+  `cargo-audit-raw.json`, `checkov-raw.json`, `gitleaks-raw.json`) at
+  signing time. The raw JSON travels between the scanner jobs and
+  `deploy-gate` as a plain `actions/upload-artifact` /
+  `actions/download-artifact` artifact, which is not itself signed or
+  encrypted in transit -- anyone able to write to the workflow run's
+  artifact store between upload and download could in principle alter it
+  before `deploy-gate` signs it. The cryptographic guarantee here is "this
+  is what the signer saw and signed," not "this is what the scanner
+  originally produced, unmodified end to end."
 
 ---
 
