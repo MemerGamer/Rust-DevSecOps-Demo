@@ -1,0 +1,23 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    ignore:
+      # INTENTIONAL: time = "0.1" (RUSTSEC-2020-0071) is a deliberately
+      # unfixed vulnerability this demo relies on to show the deploy gate
+      # blocking on a failed SCA check. Do not let dependabot "fix" it by
+      # bumping past 0.1.x; see README.md and Cargo.toml.
+      - dependency-name: "time"
+        versions: [">=0.2.0"]
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
