@@ -4,11 +4,18 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Let a new release sit for a week before dependabot proposes it, so a
+    # freshly published (and possibly yanked or compromised) action version
+    # is not pulled in on day one.
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     ignore:
       # INTENTIONAL: time = "0.1" (RUSTSEC-2020-0071) is a deliberately
       # unfixed vulnerability this demo relies on to show the deploy gate
@@ -21,3 +28,5 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7

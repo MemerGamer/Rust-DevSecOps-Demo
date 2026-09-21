@@ -74,7 +74,14 @@ jobs:
           # this job (findings are a policy question for the deploy gate),
           # but a missing/empty output file means the scan itself broke and
           # must fail closed.
-          semgrep --config=auto --json --output results/semgrep-raw.json . || true
+          #
+          # --config=auto is nondeterministic (it resolves a rule set from
+          # the Semgrep Registry at request time) and does not reliably
+          # flag this demo's intentional Rust issues. Use the repo-local
+          # rules in .semgrep/ (written to match this demo's exact code)
+          # plus the pinned p/rust registry pack instead, and disable
+          # anonymous usage metrics for a fully deterministic run.
+          semgrep --config .semgrep/ --config p/rust --json --metrics=off --output results/semgrep-raw.json . || true
           test -s results/semgrep-raw.json || {
             echo "::error::semgrep produced no output (results/semgrep-raw.json missing or empty)"
             exit 1
@@ -212,6 +219,14 @@ jobs:
     runs-on: ubuntu-latest
     needs: [sast, sca, config-scan, secret-scan]
     environment: production
+    # Dependabot-triggered runs (both PRs opened by dependabot and, on some
+    # event configurations, pushes it makes) do not receive repository
+    # secrets, so the *_SIGNING_KEY inputs below would be empty and
+    # normalize-sign would fail on every dependabot run for a reason that
+    # has nothing to do with the security findings. The four scanner jobs
+    # above still run and upload their raw results either way; only the
+    # signing/gate step is skipped for dependabot's own runs.
+    if: github.actor != 'dependabot[bot]'
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -284,14 +299,19 @@ jobs:
           require-log-entries: "true"
           output: gate-decision.json
           # The bundled default policy's blocking threshold is "critical".
-          # This demo's intentional issues (command injection/unsafe block,
-          # RUSTSEC-2020-0071, Dockerfile findings) are real but rated
-          # high/medium, not critical, by the normalize adapters' severity
-          # mapping -- and gitleaks' own default allowlist does not flag the
-          # well-known AWS example key used in src/stats.rs. Lowering the
-          # blocking threshold to "medium" (still the bundled policy, no
-          # custom policy file) is what actually makes the gate deny on
-          # these findings; see README.md for the exact reasons observed.
+          # This demo's intentional issues (command injection, unnecessary
+          # unsafe block, RUSTSEC-2020-0071, Dockerfile findings) are real
+          # but rated high/medium, not critical, by the normalize adapters'
+          # severity mapping (shell injection -> high, unsafe block ->
+          # medium, RUSTSEC-2020-0071's CVSS 6.2 -> medium, checkov's
+          # severity-less CKV_DOCKER_* findings -> medium) -- and gitleaks'
+          # own default allowlist does not flag the well-known AWS example
+          # key used in src/stats.rs. Lowering the blocking threshold to
+          # "medium" (still the bundled policy, no custom policy file) is
+          # what actually makes the gate deny on these findings; see
+          # README.md for the exact reasons observed (both a
+          # "failed checks" reason and a finding-count reason, count not
+          # pinned since it depends on scanner/ruleset versions).
           fail-on-severity: medium
           # This demo intentionally contains unfixed vulnerabilities (see
           # README) so the gate is expected to deny deployment. `expect:
