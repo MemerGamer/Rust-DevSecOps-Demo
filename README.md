@@ -11,7 +11,8 @@ GitHub Actions instead of reimplementing the attestation and gate logic:
 **Purpose**: Demonstrate the pipeline actively blocking a deployment when
 security checks detect real vulnerabilities. The `feat: add game statistics
 webhook` commit introduces four intentional security issues -- one per check
-type -- causing the deploy gate to BLOCK, with the reasons recorded
+type. Three of the four cause the deploy gate to BLOCK (the secret finding
+is allowlisted by gitleaks, as explained later); the reasons are recorded
 cryptographically in the attestation chain.
 
 ---
@@ -35,8 +36,9 @@ demo's exact code, `.semgrep/demo.yml`:
 
 - `rust-shell-injection` (severity `ERROR`, normalizes to `high`): flags a
   `format!`-built string reaching `Command::new("sh").arg("-c").arg(...)`
-  (command/shell injection, CWE-78). Matches once, on the `format!` call in
-  `stats.rs`.
+  (command/shell injection, CWE-78). The rule's `pattern-sinks` uses
+  `focus-metavariable` on the sink argument, so it matches once, at the
+  `.arg(&cmd)` sink in `stats.rs`, not on the `format!` call itself.
 - `rust-unsafe-from-utf8-unchecked` (severity `WARNING`, normalizes to
   `medium`): flags `unsafe` blocks built around
   `std::str::from_utf8_unchecked` / `std::slice::from_raw_parts`. The
@@ -84,7 +86,7 @@ deny. If you swap in a key that is not on gitleaks' allowlist, the
 zero-tolerance `secret` check type would additionally contribute a
 "hardcoded credential finding(s)" deny reason.
 
-With the fixtures used in local validation (see "Validation" below), the
+With the current scanner output reproduced by a CI run of this pipeline, the
 gate denied with both of these reasons:
 
 ```
@@ -281,9 +283,14 @@ default points at the GitHub release.
   restrict that environment to `main` with a deployment branch policy (and
   optionally required reviewers, under **Settings -> Environments ->
   production**). After that change, PR and feature-branch runs of
-  `deploy-gate` (which references `environment: production`) skip signing
-  entirely rather than exposing the keys, since only runs on `main` are
-  permitted to use the environment's secrets.
+  `deploy-gate` (which references `environment: production`) do not skip
+  signing -- they FAIL, because GitHub rejects the environment outright
+  ("Branch ... is not allowed to deploy to production due to environment
+  protection rules"). The signing keys remain unexposed on those runs, but
+  to keep PR CI green under this hardening, the `deploy-gate` job's `if:`
+  condition would also need to exclude `pull_request` events and non-main
+  refs, so the job simply does not run on branches that are not permitted
+  to use the environment's secrets.
 - **Dependabot PRs skip the gate.** The `if:` condition on `deploy-gate`
   excludes `github.actor == 'dependabot[bot]'` runs (see "Pipeline
   overview" above), so a dependabot version bump never actually exercises
@@ -294,8 +301,7 @@ default points at the GitHub release.
   (**Settings -> Secrets and variables -> Dependabot**) and relax the
   `if:` condition to stop excluding `dependabot[bot]`. This is a
   deliberate trade-off the current configuration does not make by default:
-  it grants a bot-authored, auto-merged PR path access to the signing
-  keys.
+  it grants a bot-authored PR path access to the signing keys.
 - **Signatures attest to what the gate job saw, not to the artifacts in
   transit.** Each signed attestation proves that the `deploy-gate` job
   observed a particular raw scanner JSON document (`semgrep-raw.json`,

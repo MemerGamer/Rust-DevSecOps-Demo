@@ -40,8 +40,10 @@
 # `actions/setup-go` step *before* the `actions/setup` step (this workflow's
 # deploy-gate job does not install Go today, since the default
 # `version: 0.4.0` path only downloads a prebuilt binary and needs no
-# compiler). Edit the workflow temporarily, or override the input via act's
-# -e/--input support, to exercise this path locally.
+# compiler). The `version:` value is a `with:` input on the composite
+# action, fed from the workflow's own YAML, not an event field -- it cannot
+# be overridden via act's -e/--input support. Edit the workflow file
+# temporarily (set `version: source`) to exercise this path locally.
 #
 # If your installed act does not support --local-repository (check with
 # `act --help | grep local-repository`) and you have no network access to
