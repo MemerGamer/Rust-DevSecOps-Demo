@@ -5,7 +5,7 @@
 #
 # The deploy-gate job pulls its logic from the composite actions in
 # MemerGamer/devsecops-attestation/actions (setup, normalize-sign, gate),
-# pinned to the commit SHA of the published v0.4.0 release, instead of
+# pinned to the commit SHA of the published v0.4.1 release, instead of
 # cloning and building this repo's own copy of the CLI. Since that release
 # exists on GitHub, act resolves the `uses:` reference over the network like
 # any other action, and deploy-gate runs end-to-end under act with no extra
@@ -25,11 +25,11 @@
 # This is only useful for testing *unreleased* changes to the composite
 # actions themselves (i.e. editing devsecops-attestation locally and
 # exercising those edits against this workflow before they are tagged and
-# pushed) -- for the pinned v0.4.0 release itself, act needs no such
+# pushed) -- for the pinned v0.4.1 release itself, act needs no such
 # redirect. IMPORTANT: --local-repository only redirects where the action
 # *definition* (action.yml) is read from. It does not change what setup.sh
-# does once it runs: with `version: 0.4.0` (the version this workflow
-# currently pins), setup.sh still downloads the real v0.4.0 release archive
+# does once it runs: with `version: 0.4.1` (the version this workflow
+# currently pins), setup.sh still downloads the real v0.4.1 release archive
 # over the network regardless of --local-repository. So testing an
 # unreleased local change to setup.sh's own install logic additionally needs
 # the workflow's `version:` input switched to "source" (which builds the CLI
@@ -37,7 +37,7 @@
 # `version: source`, the setup action's own docs say it requires Go on PATH
 # inside the job that runs it: add an `actions/setup-go` step *before* the
 # `actions/setup` step (this workflow's deploy-gate job does not install Go
-# today, since the default `version: 0.4.0` path only downloads a prebuilt
+# today, since the default `version: 0.4.1` path only downloads a prebuilt
 # binary and needs no compiler). The `version:` value is a `with:` input on
 # the composite action, fed from the workflow's own YAML, not an event
 # field -- it cannot be overridden via act's -e/--input support. Edit the
@@ -57,10 +57,10 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # the two repos are not checked out side by side.
 ATTESTATION_SRC="${ATTESTATION_SRC:-$(git -C "$REPO_DIR" rev-parse --show-toplevel)/../devsecops-attestation}"
 # Commit SHA the workflow's MemerGamer/devsecops-attestation/actions/*
-# references are pinned to (the v0.4.0 release). Must match the `uses:` refs
+# references are pinned to (the v0.4.1 release). Must match the `uses:` refs
 # in .github/workflows/devsecops-pipeline.yml exactly, since --local-repository
 # below maps by this same ref.
-ATTESTATION_SHA="ed0b603a70a0146264aa91eecfd17d95eccf9d38"
+ATTESTATION_SHA="43a819d52e705bbd2aad2e6be5c34bf9584880af"
 # BINS_DIR/KEYS_DIR/ARTIFACTS_DIR default to freshly created, randomly named
 # directories (mktemp -d) rather than fixed shared paths like /tmp/act-bins:
 # a fixed, predictable path under a world-writable directory is a symlink /
@@ -176,7 +176,7 @@ ACT_CMD=(act push -e "$PUSH_EVENT_FILE" --artifact-server-path "$ARTIFACTS_DIR")
 # Map the pinned MemerGamer/devsecops-attestation/actions/*@$ATTESTATION_SHA
 # reference to a local checkout whenever one is available, so local edits to
 # the composite actions can be exercised without tagging and pushing a new
-# release first. Since v0.4.0 is published, act can resolve the reference
+# release first. Since v0.4.1 is published, act can resolve the reference
 # from GitHub on its own even without this -- --local-repository is only
 # needed here for testing unreleased action changes (see the comment block
 # at the top of this file).
