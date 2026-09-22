@@ -214,8 +214,14 @@ jobs:
           set -euo pipefail
           archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           base_url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
-          curl -fsSL -o "${archive}" "${base_url}/${archive}"
-          curl -fsSL -o checksums.txt "${base_url}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          # Retry transient failures (connect/transfer timeouts, connection
+          # resets, and HTTP 408/429/500/502/503/504) rather than failing
+          # the job outright, while still failing closed on a genuine,
+          # persistent error, matching devsecops-attestation's own
+          # actions/setup/setup.sh download retry behavior.
+          curl_flags=(--retry 5 --retry-delay 3 --retry-connrefused --connect-timeout 20 --max-time 300)
+          curl -fsSL "${curl_flags[@]}" -o "${archive}" "${base_url}/${archive}"
+          curl -fsSL "${curl_flags[@]}" -o checksums.txt "${base_url}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
           # Verify against both the same-origin checksums file AND the
           # SHA256 hard-coded in GITLEAKS_LINUX_X64_SHA256 above (taken from
           # this same checksums file ahead of time and cross-checked by
