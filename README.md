@@ -218,7 +218,7 @@ bash scripts/act-debug.sh
 
 The `deploy-gate` job resolves `MemerGamer/devsecops-attestation/actions/*`
 composite actions from GitHub at the pinned commit SHA of the published
-`v0.4.0` release. Since that release exists on GitHub, act can resolve the
+`v0.4.1` release. Since that release exists on GitHub, act can resolve the
 reference over the network like any other action, and `deploy-gate` runs
 end-to-end under `act` with no extra flags, as long as `actions/setup`'s
 `verify-signature` check can reach the network -- GitHub Releases (for the
@@ -235,13 +235,13 @@ changes to the composite actions themselves (i.e. editing
 workflow before they are tagged and pushed) -- `--local-repository` only
 redirects where the action *definition* (`action.yml`) is read from, it does
 not change what `setup.sh` itself does once it runs. With the workflow's
-default `version: 0.4.0`, `setup.sh` still downloads the real v0.4.0 release
+default `version: 0.4.1`, `setup.sh` still downloads the real v0.4.1 release
 archive over the network regardless of `--local-repository`, so testing an
 unreleased local change to `setup.sh`'s own install logic additionally needs
 the workflow's `version:` input switched to `source` (which builds the CLI
 from the checkout instead of downloading anything, and needs Go on `PATH`
 inside the job -- add an `actions/setup-go` step before `actions/setup`,
-since the default `version: 0.4.0` path needs no compiler and this workflow
+since the default `version: 0.4.1` path needs no compiler and this workflow
 does not install Go today). The scanner jobs (`build`, `sast`, `sca`,
 `config-scan`, `secret-scan`) do not depend on devsecops-attestation at all
 and run fine under `act` on their own, e.g. `bash scripts/act-debug.sh sast`.
@@ -265,9 +265,9 @@ runners. Reference them by full URL instead of the GitHub `owner/repo`
 shorthand, e.g.:
 
 ```yaml
-- uses: https://forgejo.remote.kovacsbalinthunor.com/kbalinthunor/devsecops-attestation/actions/setup@v0.4.0
+- uses: https://forgejo.remote.kovacsbalinthunor.com/kbalinthunor/devsecops-attestation/actions/setup@v0.4.1
   with:
-    version: "0.4.0"
+    version: "0.4.1"
     download-base-url: https://forgejo.remote.kovacsbalinthunor.com/kbalinthunor/devsecops-attestation/releases/download
 ```
 
