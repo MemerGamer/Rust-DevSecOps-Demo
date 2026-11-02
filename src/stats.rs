@@ -11,6 +11,8 @@ const STATS_WEBHOOK_URL: &str = "https://hooks.example.com/game-stats";
 // with a value that is not on gitleaks' allowlist.
 const STATS_API_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
 
+// Deliberate demo finding (sh -c spawn left un-waited); must stay, do not fix.
+#[allow(clippy::zombie_processes)]
 pub fn log_result(outcome: &str) {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
