@@ -388,7 +388,7 @@ jobs:
           fail-on: medium
 
       - name: Evaluate deploy gate
-        uses: MemerGamer/devsecops-attestation/actions/gate@43a819d52e705bbd2aad2e6be5c34bf9584880af # v0.4.1
+        uses: MemerGamer/devsecops-attestation/actions/gate@66fbd8d09404848262294452293cf17b64d5077d # v0.4.2
         with:
           chain: ${{ runner.temp }}/attestation-chain.json
           authorized-signers: >-
