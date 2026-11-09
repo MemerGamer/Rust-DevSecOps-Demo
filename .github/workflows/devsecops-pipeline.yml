@@ -352,7 +352,7 @@ jobs:
       # the gate (also lowered to medium below) then denies on, an
       # inconsistency between what was attested and what was enforced.
       - name: Normalize and sign SAST attestation
-        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@43a819d52e705bbd2aad2e6be5c34bf9584880af # v0.4.1
+        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@66fbd8d09404848262294452293cf17b64d5077d # v0.4.2
         with:
           tool: semgrep
           raw-result: raw/sast/semgrep-raw.json
@@ -361,7 +361,7 @@ jobs:
           fail-on: medium
 
       - name: Normalize and sign SCA attestation
-        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@43a819d52e705bbd2aad2e6be5c34bf9584880af # v0.4.1
+        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@66fbd8d09404848262294452293cf17b64d5077d # v0.4.2
         with:
           tool: cargo-audit
           raw-result: raw/sca/cargo-audit-raw.json
@@ -370,7 +370,7 @@ jobs:
           fail-on: medium
 
       - name: Normalize and sign config attestation
-        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@43a819d52e705bbd2aad2e6be5c34bf9584880af # v0.4.1
+        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@66fbd8d09404848262294452293cf17b64d5077d # v0.4.2
         with:
           tool: checkov
           raw-result: raw/config/checkov-raw.json
@@ -379,7 +379,7 @@ jobs:
           fail-on: medium
 
       - name: Normalize and sign secret scan attestation
-        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@43a819d52e705bbd2aad2e6be5c34bf9584880af # v0.4.1
+        uses: MemerGamer/devsecops-attestation/actions/normalize-sign@66fbd8d09404848262294452293cf17b64d5077d # v0.4.2
         with:
           tool: gitleaks
           raw-result: raw/secret/gitleaks-raw.json
